@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.node/
+*.vsix
+.vscode-test/
+CLAUDE.local.md
+.claude/settings.local.json

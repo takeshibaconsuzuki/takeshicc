@@ -1,0 +1,94 @@
+{
+  "name": "takeshicc",
+  "displayName": "Takeshi CC",
+  "description": "Quickly send file references to Claude Code in your terminal, and browse past sessions.",
+  "version": "0.0.1",
+  "publisher": "takeshi",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "takeshicc.insertReference",
+        "title": "Takeshi CC: Insert File Reference"
+      },
+      {
+        "command": "takeshicc.openSession",
+        "title": "Takeshi CC: Open Session"
+      },
+      {
+        "command": "takeshicc.refreshSessions",
+        "title": "Takeshi CC: Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "takeshicc.newChat",
+        "title": "Takeshi CC: New Chat",
+        "icon": "$(add)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "takeshicc.insertReference",
+        "key": "alt+k",
+        "mac": "alt+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "takeshicc",
+          "title": "Takeshi CC",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "takeshicc": [
+        {
+          "id": "takeshicc.sessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "takeshicc.newChat",
+          "when": "view == takeshicc.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "takeshicc.refreshSessions",
+          "when": "view == takeshicc.sessions",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "vsix": "npm run package && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.93.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.114"
+  }
+}
