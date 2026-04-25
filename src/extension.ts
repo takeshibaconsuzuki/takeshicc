@@ -171,7 +171,7 @@ async function insertReferenceCommand(): Promise<void> {
     return;
   }
 
-  terminal.show(true);
+  terminal.show(false);
   terminal.sendText(ref + ' ', false);
 }
 
