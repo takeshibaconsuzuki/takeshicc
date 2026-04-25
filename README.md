@@ -17,7 +17,9 @@ Activity-bar panel listing Claude Code sessions for the current workspace, newes
 - **`+` New Chat** — spawns `claude` in a new terminal and polls the session store until the new session ID shows up, then links the terminal to it.
 - **Click a session** — if a tracked terminal exists for it, that terminal is revealed; otherwise a new `claude --resume <id>` terminal is spawned.
 - **Manual invocations are tracked.** Type `claude`, `claude --resume <id>`, or `claude -r <id>` in any integrated terminal and the extension associates it with the session automatically.
-- **On claude exit, associations drop.** The terminal stays (at your shell prompt, yours to reuse); next click on the session opens a fresh `claude --resume` terminal.
+- **On claude exit:**
+  - For terminals the extension spawned (New Chat, click-to-resume), the terminal is disposed — its lifecycle matches the `claude` process.
+  - For manually-invoked terminals, the association drops but the terminal stays at your shell prompt, yours to reuse. Next click on the session opens a fresh `claude --resume` terminal.
 
 ### 3. Per-session status indicator
 
@@ -71,7 +73,7 @@ Or pick your own key — add to `keybindings.json`:
 ## Requirements
 
 - VS Code / Cursor 1.93 or newer (for the shell-integration execution events used to detect `claude` starting and exiting).
-- **Shell integration enabled in your terminal** (default in Cursor and recent VS Code). If `onDidStartTerminalShellExecution` events don't fire, manual-invocation tracking and the association-drop-on-exit both silently no-op — the extension still works for reference insertion and for terminals it spawns itself.
+- **Shell integration enabled in your terminal** (default in Cursor and recent VS Code). If `onDidStartTerminalShellExecution` events don't fire, manual-invocation tracking, association-drop-on-exit, and auto-dispose of extension-spawned terminals all silently no-op — the extension still works for reference insertion and for spawning new terminals.
 
 ## Development
 

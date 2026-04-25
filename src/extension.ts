@@ -92,14 +92,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     // When `claude` exits inside a tracked terminal, detach the terminal from
-    // its session. The terminal itself is left alone (the user's shell is back
-    // at its prompt), but clicking the session in the sidebar will now spawn
-    // a fresh `claude --resume` terminal rather than reveal this one.
+    // its session. For terminals we spawned ourselves (newChat / openSession),
+    // also dispose the terminal — the user didn't open it, so closing it
+    // matches the lifecycle of the claude process. Manually-invoked terminals
+    // are left alone so the user keeps their shell prompt.
     vscode.window.onDidEndTerminalShellExecution((event) => {
       if (!tracker.isTracked(event.terminal)) return;
       const parsed = parseClaudeCommand(event.execution.commandLine.value);
       if (!parsed) return;
+      const owned = tracker.isOwned(event.terminal);
       tracker.unregister(event.terminal);
+      if (owned) event.terminal.dispose();
     }),
 
     // Refresh on terminal close — sessions are flushed to disk on exit.
@@ -202,6 +205,7 @@ async function openSessionCommand(
     name: `Claude: ${label}`,
     cwd,
   });
+  tracker.markOwned(terminal);
   tracker.register(sessionId, terminal);
   hookStates.seedIdle(sessionId, cwd);
   log.appendLine(`  → spawned terminal + seedIdle(${sessionId.slice(0, 8)})`);
@@ -223,6 +227,7 @@ async function newChatCommand(
     name: 'Claude: new',
     cwd,
   });
+  tracker.markOwned(terminal);
   tracker.markPending(terminal);
   terminal.show(false);
   terminal.sendText('claude', true);

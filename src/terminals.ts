@@ -11,6 +11,7 @@ export function resolveTargetTerminal(): vscode.Terminal | undefined {
 export class TerminalTracker implements vscode.Disposable {
   private readonly map = new Map<string, vscode.Terminal>();
   private readonly pending = new Set<vscode.Terminal>();
+  private readonly owned = new Set<vscode.Terminal>();
   private readonly closeSub: vscode.Disposable;
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly unregisterEmitter = new vscode.EventEmitter<string>();
@@ -47,6 +48,7 @@ export class TerminalTracker implements vscode.Disposable {
       }
     }
     this.pending.delete(terminal);
+    this.owned.delete(terminal);
     for (const id of cleared) this.unregisterEmitter.fire(id);
     if (cleared.length > 0) this.changeEmitter.fire();
   }
@@ -67,11 +69,21 @@ export class TerminalTracker implements vscode.Disposable {
     return this.pending.has(terminal);
   }
 
+  /** Mark a terminal as spawned by the extension — eligible for auto-dispose on claude exit. */
+  markOwned(terminal: vscode.Terminal): void {
+    this.owned.add(terminal);
+  }
+
+  isOwned(terminal: vscode.Terminal): boolean {
+    return this.owned.has(terminal);
+  }
+
   dispose(): void {
     this.closeSub.dispose();
     this.changeEmitter.dispose();
     this.unregisterEmitter.dispose();
     this.map.clear();
     this.pending.clear();
+    this.owned.clear();
   }
 }
