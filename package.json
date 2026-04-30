@@ -38,6 +38,36 @@
         "key": "alt+k",
         "mac": "alt+k",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "runCommands",
+        "key": "ctrl+`",
+        "mac": "ctrl+`",
+        "args": {
+          "commands": [
+            "workbench.action.terminal.toggleTerminal",
+            "workbench.action.toggleMaximizedPanel"
+          ]
+        },
+        "when": "!panelVisible"
+      },
+      {
+        "command": "runCommands",
+        "key": "ctrl+`",
+        "mac": "ctrl+`",
+        "args": {
+          "commands": [
+            "workbench.action.toggleMaximizedPanel",
+            "workbench.action.closePanel"
+          ]
+        },
+        "when": "panelVisible && panelMaximized"
+      },
+      {
+        "command": "workbench.action.toggleMaximizedPanel",
+        "key": "ctrl+`",
+        "mac": "ctrl+`",
+        "when": "panelVisible && !panelMaximized"
       }
     ],
     "viewsContainers": {
