@@ -204,12 +204,12 @@ async function openSessionCommand(
   const terminal = vscode.window.createTerminal({
     name: `Claude: ${label}`,
     cwd,
-    location: vscode.TerminalLocation.Editor,
   });
   tracker.markOwned(terminal);
   tracker.register(sessionId, terminal);
   hookStates.seedIdle(sessionId, cwd);
   log.appendLine(`  → spawned terminal + seedIdle(${sessionId.slice(0, 8)})`);
+  terminal.show(false);
   terminal.sendText(`claude --resume ${sessionId}`, true);
 }
 
@@ -226,10 +226,10 @@ async function newChatCommand(
   const terminal = vscode.window.createTerminal({
     name: 'Claude: new',
     cwd,
-    location: vscode.TerminalLocation.Editor,
   });
   tracker.markOwned(terminal);
   tracker.markPending(terminal);
+  terminal.show(false);
   terminal.sendText('claude', true);
 
   void attachNewSession(terminal, service, provider, tracker, hookStates);
