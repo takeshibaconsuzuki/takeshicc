@@ -8,7 +8,8 @@ import {
   type VectorDatabase,
 } from '@zilliz/claude-context-core';
 import { NullVectorDatabase } from './nullVectorDb';
-import { LanceDBVectorDatabase } from './vendor/lancedb-vectordb';
+import { LanceDBVectorDatabase } from './lancedb-vectordb';
+import { bumpRunningChunks } from './indexingState';
 
 const TAKESHICC_DIR = '.takeshicc';
 const LANCEDB_DIR = `${TAKESHICC_DIR}/lancedb`;
@@ -125,7 +126,13 @@ function defaultVectorDatabaseFactory(): VectorDatabase {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) return new NullVectorDatabase();
   void ensureGitignore(workspaceRoot);
-  return new LanceDBVectorDatabase({ uri: path.join(workspaceRoot, LANCEDB_DIR) });
+  return new LanceDBVectorDatabase({
+    uri: path.join(workspaceRoot, LANCEDB_DIR),
+    // Live chunk-count tracking: every successful insert / delete bumps
+    // the running indexingState entry for this workspace. No-op when
+    // nothing is running.
+    onChunkChange: (delta) => bumpRunningChunks(workspaceRoot, delta),
+  });
 }
 
 /**

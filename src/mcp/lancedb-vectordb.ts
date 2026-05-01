@@ -25,6 +25,15 @@ import {
 export interface LanceDBConfig {
   uri?: string; // Path to LanceDB database directory
   consistencyLevel?: 'strong' | 'eventual'; // For future use if needed
+  /**
+   * Notified after each successful insert / delete with the row delta
+   * (positive on insert, negative on delete). Lets callers track a live
+   * chunk count without polling. Not invoked from createCollection's
+   * sample-row setup since those bypass the public insert/delete API.
+   *
+   * Added by takeshicc — not part of the upstream vendor file.
+   */
+  onChunkChange?: (delta: number, collectionName: string) => void;
 }
 
 interface LanceDBTableSchema extends Record<string, any> {
@@ -223,6 +232,7 @@ export class LanceDBVectorDatabase implements VectorDatabase {
       }));
 
       await table.add(data);
+      this.config.onChunkChange?.(documents.length, collectionName);
       console.log(`✅ Inserted ${documents.length} documents into '${collectionName}'`);
     } catch (error) {
       console.error(`❌ Failed to insert documents into '${collectionName}':`, error);
@@ -276,6 +286,7 @@ export class LanceDBVectorDatabase implements VectorDatabase {
       // Build filter expression for deletion
       const filter = `id IN (${ids.map((id) => `'${id}'`).join(', ')})`;
       await table.delete(filter);
+      this.config.onChunkChange?.(-ids.length, collectionName);
 
       console.log(`✅ Deleted ${ids.length} documents from '${collectionName}'`);
     } catch (error) {

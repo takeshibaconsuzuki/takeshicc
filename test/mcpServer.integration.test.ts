@@ -1,7 +1,10 @@
 import { describe, it, expect, afterAll } from 'vitest';
+import type * as vscode from 'vscode';
 import { McpHttpServer, MCP_PATH, MCP_TOKEN_HEADER } from '../src/mcp/server';
 
-const server = new McpHttpServer();
+const WORKSPACE = '/tmp';
+const noopLog = { appendLine: () => {} } as unknown as vscode.OutputChannel;
+const server = new McpHttpServer(WORKSPACE, undefined, noopLog);
 
 afterAll(() => server.dispose());
 
@@ -59,6 +62,28 @@ describe('McpHttpServer', () => {
     ]);
   });
 
+  it('tool input schemas no longer expose a path argument', async () => {
+    const { text } = await rpc({ jsonrpc: '2.0', id: 5, method: 'tools/list' });
+    const parsed = parseSseJson(text) as {
+      result: {
+        tools: {
+          name: string;
+          inputSchema: { properties?: Record<string, unknown>; required?: string[] };
+        }[];
+      };
+    };
+    for (const tool of parsed.result.tools) {
+      expect(
+        tool.inputSchema.properties?.path,
+        `${tool.name} still exposes path`
+      ).toBeUndefined();
+      expect(
+        tool.inputSchema.required ?? [],
+        `${tool.name} still requires path`
+      ).not.toContain('path');
+    }
+  });
+
   it('search_code surfaces "embedding not configured" error when API key is unset', async () => {
     const { text } = await rpc({
       jsonrpc: '2.0',
@@ -66,7 +91,7 @@ describe('McpHttpServer', () => {
       method: 'tools/call',
       params: {
         name: 'search_code',
-        arguments: { path: '/tmp', query: 'anything' },
+        arguments: { query: 'anything' },
       },
     });
     const parsed = parseSseJson(text) as {
@@ -83,7 +108,7 @@ describe('McpHttpServer', () => {
       method: 'tools/call',
       params: {
         name: 'get_indexing_status',
-        arguments: { path: '/tmp' },
+        arguments: {},
       },
     });
     const parsed = parseSseJson(text) as {
@@ -93,24 +118,47 @@ describe('McpHttpServer', () => {
     // "no run recorded in this session" message rather than a hard error.
     expect(parsed.result.content[0].text).toMatch(/No indexing run recorded/i);
   });
+});
 
-  it('rejects relative paths', async () => {
-    const { text } = await rpc({
+describe('McpHttpServer without a workspace', () => {
+  const noWsServer = new McpHttpServer(undefined, undefined, noopLog);
+  afterAll(() => noWsServer.dispose());
+
+  async function call(body: unknown): Promise<string> {
+    const { port, token } = await noWsServer.getConfig();
+    const r = await fetch(`http://127.0.0.1:${port}${MCP_PATH}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        [MCP_TOKEN_HEADER]: token,
+      },
+      body: JSON.stringify(body),
+    });
+    return r.text();
+  }
+
+  it('clear_index reports the missing workspace clearly', async () => {
+    await call({
       jsonrpc: '2.0',
-      id: 5,
-      method: 'tools/call',
+      id: 1,
+      method: 'initialize',
       params: {
-        name: 'clear_index',
-        arguments: { path: 'relative/path' },
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 't', version: '0' },
       },
     });
-    const parsed = parseSseJson(text) as
-      | { result: { content: { text: string }[]; isError?: boolean } }
-      | { error: { message: string } };
-    if ('error' in parsed) {
-      expect(parsed.error.message).toMatch(/absolute/i);
-    } else {
-      expect(parsed.result.content[0].text).toMatch(/absolute/i);
-    }
+    const text = await call({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'clear_index', arguments: {} },
+    });
+    const parsed = parseSseJson(text) as {
+      result: { content: { text: string }[]; isError?: boolean };
+    };
+    expect(parsed.result.isError).toBe(true);
+    expect(parsed.result.content[0].text).toMatch(/no workspace folder/i);
   });
 });

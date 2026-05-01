@@ -8,6 +8,11 @@ export const SERVER_NAME = 'takeshicc';
 export interface McpRegisterParams {
   port: number;
   token: string;
+  workspaceRoot: string;
+}
+
+export interface McpUnregisterParams {
+  workspaceRoot: string;
 }
 
 type Json =
@@ -19,10 +24,11 @@ type Json =
   | { [key: string]: Json };
 
 /**
- * Merge our MCP server entry into ~/.claude.json under `mcpServers.takeshicc`.
- * Other entries (user-added MCP servers, top-level Claude Code settings) are
- * preserved. Each activation rotates the port and token, so the entry is
- * always overwritten with fresh values.
+ * Merge our MCP server entry into ~/.claude.json under
+ * `projects.<workspaceRoot>.mcpServers.takeshicc`. Other entries (sibling
+ * MCP servers, unrelated project metadata, top-level Claude Code settings)
+ * are preserved. Each activation rotates the port and token, so the entry
+ * is always overwritten with fresh values.
  *
  * Returns the path written. Throws if the existing file isn't valid JSON —
  * we refuse to overwrite what might be the user's work.
@@ -30,12 +36,12 @@ type Json =
 export async function registerMcpServer(params: McpRegisterParams): Promise<string> {
   const file = path.join(os.homedir(), '.claude.json');
   const existing = await readJson(file);
-  const merged = mergeMcp(existing, params.port, params.token);
+  const merged = mergeMcp(existing, params.port, params.token, params.workspaceRoot);
   await fs.writeFile(file, JSON.stringify(merged, null, 2) + '\n', 'utf8');
   return file;
 }
 
-export async function unregisterMcpServer(): Promise<void> {
+export async function unregisterMcpServer(params: McpUnregisterParams): Promise<void> {
   const file = path.join(os.homedir(), '.claude.json');
   let existing: Json;
   try {
@@ -44,39 +50,54 @@ export async function unregisterMcpServer(): Promise<void> {
     return;
   }
   if (existing === null) return;
-  const cleaned = removeMcp(existing);
+  const cleaned = removeMcp(existing, params.workspaceRoot);
   await fs.writeFile(file, JSON.stringify(cleaned, null, 2) + '\n', 'utf8');
 }
 
 /**
- * Pure merge. Exported for unit tests. Sets `mcpServers.takeshicc` to a fresh
- * entry pointing at the current loopback port; preserves any sibling servers.
+ * Pure merge. Exported for unit tests. Sets
+ * `projects[workspaceRoot].mcpServers.takeshicc` to a fresh entry pointing
+ * at the current loopback port; preserves any sibling servers and other
+ * project metadata.
  */
 export function mergeMcp(
   settings: Json,
   port: number,
-  token: string
+  token: string,
+  workspaceRoot: string
 ): { [key: string]: Json } {
   const root = isObject(settings) ? { ...settings } : {};
-  const servers = isObject(root.mcpServers) ? { ...root.mcpServers } : {};
+  const projects = isObject(root.projects) ? { ...root.projects } : {};
+  const project = isObject(projects[workspaceRoot]) ? { ...projects[workspaceRoot] } : {};
+  const servers = isObject(project.mcpServers) ? { ...project.mcpServers } : {};
   servers[SERVER_NAME] = makeEntry(port, token);
-  root.mcpServers = servers;
+  project.mcpServers = servers;
+  projects[workspaceRoot] = project;
+  root.projects = projects;
   return root;
 }
 
 /**
- * Pure remove. Exported for unit tests. Deletes only our entry; sibling
- * servers and unrelated top-level keys are untouched.
+ * Pure remove. Exported for unit tests. Deletes only our entry under
+ * `projects[workspaceRoot].mcpServers.takeshicc`; sibling servers and
+ * unrelated project / top-level keys are untouched.
  */
-export function removeMcp(settings: Json): Json {
+export function removeMcp(settings: Json, workspaceRoot: string): Json {
   if (!isObject(settings)) return settings;
   const root = { ...settings };
-  if (!isObject(root.mcpServers)) return root;
-  const servers = { ...root.mcpServers };
+  if (!isObject(root.projects)) return root;
+  const projects = { ...root.projects };
+  const project = projects[workspaceRoot];
+  if (!isObject(project)) return root;
+  if (!isObject(project.mcpServers)) return root;
+  const servers = { ...project.mcpServers };
   if (!isOurEntry(servers[SERVER_NAME])) return root;
   delete servers[SERVER_NAME];
-  if (Object.keys(servers).length === 0) delete root.mcpServers;
-  else root.mcpServers = servers;
+  const updatedProject: { [key: string]: Json } = { ...project };
+  if (Object.keys(servers).length === 0) delete updatedProject.mcpServers;
+  else updatedProject.mcpServers = servers;
+  projects[workspaceRoot] = updatedProject;
+  root.projects = projects;
   return root;
 }
 

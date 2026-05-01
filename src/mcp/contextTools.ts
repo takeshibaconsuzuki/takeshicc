@@ -1,5 +1,5 @@
-import * as path from 'path';
 import { z } from 'zod';
+import type * as vscode from 'vscode';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   AstCodeSplitter,
@@ -7,30 +7,24 @@ import {
   type SemanticSearchResult,
 } from '@zilliz/claude-context-core';
 import { ContextFactory, EmbeddingNotConfiguredError } from './context';
+import { type IndexingState, indexingStates } from './indexingState';
 
 // -- Tool descriptions ------------------------------------------------------
 //
-// These strings are copied verbatim from @zilliz/claude-context-mcp@0.1.11
-// (dist/index.js). Agents read them when deciding which tool to call, so
-// preserving wording, formatting, and emoji exactly is what gives us the same
-// invocation behavior as the upstream MCP server.
+// Originally these mirrored @zilliz/claude-context-mcp@0.1.11 verbatim. We've
+// since deviated — the workspace path is fixed at server construction, so the
+// `path` argument is gone and the descriptions are rewritten to match.
 
 export const INDEX_CODEBASE_DESCRIPTION = `
-Index a codebase directory to enable semantic search using a configurable code splitter.
-
-⚠️ **IMPORTANT**:
-- You MUST provide an absolute path to the target codebase.
+Index the active workspace to enable semantic search using a configurable code splitter.
 
 ✨ **Usage Guidance**:
 - This tool is typically used when search fails due to an unindexed codebase.
-- If indexing is attempted on an already indexed path, and a conflict is detected, you MUST prompt the user to confirm whether to proceed with a force index (i.e., re-indexing and overwriting the previous index).
+- If indexing is attempted on an already-indexed workspace and a conflict is detected, you MUST prompt the user to confirm whether to proceed with a force index (i.e., re-indexing and overwriting the previous index).
 `;
 
 export const SEARCH_CODE_DESCRIPTION = `
-Search the indexed codebase using natural language queries within a specified absolute path.
-
-⚠️ **IMPORTANT**:
-- You MUST provide an absolute path.
+Search the indexed workspace using natural language queries.
 
 🎯 **When to Use**:
 This tool is versatile and can be used before completing various tasks to retrieve relevant context:
@@ -43,23 +37,18 @@ This tool is versatile and can be used before completing various tasks to retrie
 - **Duplicate detection**: Identify redundant or duplicated code patterns across the codebase
 
 ✨ **Usage Guidance**:
-- If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
-- You can then use the index_codebase tool to index the codebase before searching again.
+- If the workspace is not indexed, this tool will return a clear error message indicating that indexing is required first.
+- You can then use the index_codebase tool to index the workspace before searching again.
 `;
 
-export const CLEAR_INDEX_DESCRIPTION =
-  'Clear the search index. IMPORTANT: You MUST provide an absolute path.';
+export const CLEAR_INDEX_DESCRIPTION = 'Clear the search index for the active workspace.';
 
 export const GET_INDEXING_STATUS_DESCRIPTION =
-  'Get the current indexing status of a codebase. Shows progress percentage for actively indexing codebases and completion status for indexed codebases.';
+  'Get the current indexing status of the active workspace. Shows progress percentage while indexing and completion status when finished.';
 
 // -- Input schemas ----------------------------------------------------------
-//
-// Mirror the upstream JSON Schema (types, descriptions, defaults, enums, max)
-// using zod. The exposed inputSchema rendered by the MCP SDK matches upstream.
 
 const indexInput = {
-  path: z.string().describe('ABSOLUTE path to the codebase directory to index.'),
   force: z
     .boolean()
     .default(false)
@@ -85,7 +74,6 @@ const indexInput = {
 };
 
 const searchInput = {
-  path: z.string().describe('ABSOLUTE path to the codebase directory to search in.'),
   query: z.string().describe('Natural language query to search for in the codebase'),
   limit: z
     .number()
@@ -100,62 +88,51 @@ const searchInput = {
     ),
 };
 
-const clearInput = {
-  path: z.string().describe('ABSOLUTE path to the codebase directory to clear.'),
-};
+const clearInput = {} as const;
+const statusInput = {} as const;
 
-const statusInput = {
-  path: z
-    .string()
-    .describe('ABSOLUTE path to the codebase directory to check status for.'),
-};
-
-// -- In-memory indexing state ----------------------------------------------
-
-type IndexingState =
-  | {
-      phase: 'running';
-      startedAt: number;
-      progress: { phase: string; current: number; total: number; percentage: number };
-    }
-  | {
-      phase: 'completed';
-      finishedAt: number;
-      indexedFiles: number;
-      totalChunks: number;
-      status: 'completed' | 'limit_reached';
-    }
-  | { phase: 'failed'; finishedAt: number; error: string };
-
-const indexingStates = new Map<string, IndexingState>();
+class NoWorkspaceError extends Error {
+  constructor() {
+    super(
+      'takeshicc: no workspace folder is open in this VS Code window — claude-context tools have no codebase to operate on.'
+    );
+    this.name = 'NoWorkspaceError';
+  }
+}
 
 // -- Tool registration ------------------------------------------------------
 
 /**
- * Register the four claude-context tools with descriptions and schemas that
- * match @zilliz/claude-context-mcp verbatim. Implementations delegate to
- * `Context` from @zilliz/claude-context-core; the underlying vector DB is
- * whatever ContextFactory has been configured with.
+ * Register the four claude-context tools. The active workspace is fixed at
+ * server-construction time and used for every call — agents don't need to
+ * pass a path. If `workspaceRoot` is undefined (no folder open), each tool
+ * returns a clear error rather than crashing.
+ *
+ * `log` receives one line at the start and end of every indexing /
+ * clear-index call so the output channel shows the full lifecycle.
  */
-export function registerContextTools(server: McpServer, factory: ContextFactory): void {
+export function registerContextTools(
+  server: McpServer,
+  factory: ContextFactory,
+  workspaceRoot: string | undefined,
+  log: vscode.OutputChannel
+): void {
   server.registerTool(
     'index_codebase',
     { description: INDEX_CODEBASE_DESCRIPTION, inputSchema: indexInput },
     async (args) => {
-      const absolutePath = requireAbsolute(args.path);
-      const existing = indexingStates.get(absolutePath);
-      if (existing?.phase === 'running') {
-        return text(
-          `Indexing already in progress for ${absolutePath} ` +
-            `(${existing.progress.percentage}%). Use get_indexing_status to monitor.`
-        );
-      }
-
       try {
+        const root = requireWorkspace(workspaceRoot);
+        const existing = indexingStates.get(root);
+        if (existing?.phase === 'running') {
+          return text(
+            `Indexing already in progress for ${root} ` +
+              `(${existing.progress.percentage}%). Use get_indexing_status to monitor.`
+          );
+        }
+
         const context = factory.get();
 
-        // Honor the splitter parameter. Upstream defaults to 'ast'; the
-        // library's default Context constructor also picks AST.
         if (args.splitter === 'langchain') {
           context.updateSplitter(new LangChainCodeSplitter());
         } else {
@@ -169,38 +146,63 @@ export function registerContextTools(server: McpServer, factory: ContextFactory)
         }
 
         const startedAt = Date.now();
-        indexingStates.set(absolutePath, {
+        log.appendLine(
+          `index_codebase: starting ${root} (splitter=${args.splitter}, force=${args.force})`
+        );
+        indexingStates.set(root, {
           phase: 'running',
           startedAt,
           progress: { phase: 'starting', current: 0, total: 0, percentage: 0 },
+          currentFiles: 0,
+          currentChunks: 0,
         });
         const stats = await context.indexCodebase(
-          absolutePath,
+          root,
           (progress) => {
-            indexingStates.set(absolutePath, { phase: 'running', startedAt, progress });
+            const prev = indexingStates.get(root);
+            // Preserve the live currentChunks bumped by the LanceDB hook —
+            // the progress callback fires per-file but chunk inserts may
+            // arrive between callbacks.
+            const currentChunks =
+              prev?.phase === 'running' ? prev.currentChunks : 0;
+            indexingStates.set(root, {
+              phase: 'running',
+              startedAt,
+              progress,
+              currentFiles: progress.current,
+              currentChunks,
+            });
           },
           args.force,
           args.ignorePatterns.length > 0 ? args.ignorePatterns : undefined
         );
-        indexingStates.set(absolutePath, {
+        const finishedAt = Date.now();
+        indexingStates.set(root, {
           phase: 'completed',
-          finishedAt: Date.now(),
+          finishedAt,
           indexedFiles: stats.indexedFiles,
           totalChunks: stats.totalChunks,
           status: stats.status,
         });
+        log.appendLine(
+          `index_codebase: completed ${root} in ${finishedAt - startedAt}ms — ` +
+            `${stats.indexedFiles} files, ${stats.totalChunks} chunks (${stats.status})`
+        );
         return text(
-          `Indexed ${absolutePath}: ${stats.indexedFiles} files, ` +
+          `Indexed ${root}: ${stats.indexedFiles} files, ` +
             `${stats.totalChunks} chunks (status: ${stats.status}).`
         );
       } catch (err) {
         const message = errorMessage(err);
-        indexingStates.set(absolutePath, {
-          phase: 'failed',
-          finishedAt: Date.now(),
-          error: message,
-        });
-        return text(`Failed to index ${absolutePath}: ${message}`, true);
+        if (workspaceRoot) {
+          indexingStates.set(workspaceRoot, {
+            phase: 'failed',
+            finishedAt: Date.now(),
+            error: message,
+          });
+        }
+        log.appendLine(`index_codebase: FAILED ${workspaceRoot ?? '<no workspace>'} — ${message}`);
+        return text(`Failed to index workspace: ${message}`, true);
       }
     }
   );
@@ -209,21 +211,21 @@ export function registerContextTools(server: McpServer, factory: ContextFactory)
     'search_code',
     { description: SEARCH_CODE_DESCRIPTION, inputSchema: searchInput },
     async (args) => {
-      const absolutePath = requireAbsolute(args.path);
       try {
+        const root = requireWorkspace(workspaceRoot);
         const context = factory.get();
         const filter = buildExtensionFilter(args.extensionFilter);
         const results = await context.semanticSearch(
-          absolutePath,
+          root,
           args.query,
           args.limit,
           undefined,
           filter
         );
         if (results.length === 0) {
-          return text(`No results for "${args.query}" in ${absolutePath}.`);
+          return text(`No results for "${args.query}" in ${root}.`);
         }
-        return text(formatResults(args.query, absolutePath, results));
+        return text(formatResults(args.query, root, results));
       } catch (err) {
         return text(`Search failed: ${errorMessage(err)}`, true);
       }
@@ -233,15 +235,22 @@ export function registerContextTools(server: McpServer, factory: ContextFactory)
   server.registerTool(
     'clear_index',
     { description: CLEAR_INDEX_DESCRIPTION, inputSchema: clearInput },
-    async (args) => {
-      const absolutePath = requireAbsolute(args.path);
+    async () => {
       try {
+        const root = requireWorkspace(workspaceRoot);
+        const startedAt = Date.now();
+        log.appendLine(`clear_index: starting ${root}`);
         const context = factory.get();
-        await context.clearIndex(absolutePath);
-        indexingStates.delete(absolutePath);
-        return text(`Cleared index for ${absolutePath}.`);
+        await context.clearIndex(root);
+        indexingStates.delete(root);
+        log.appendLine(`clear_index: completed ${root} in ${Date.now() - startedAt}ms`);
+        return text(`Cleared index for ${root}.`);
       } catch (err) {
-        return text(`Failed to clear index: ${errorMessage(err)}`, true);
+        const message = errorMessage(err);
+        log.appendLine(
+          `clear_index: FAILED ${workspaceRoot ?? '<no workspace>'} — ${message}`
+        );
+        return text(`Failed to clear index: ${message}`, true);
       }
     }
   );
@@ -249,40 +258,42 @@ export function registerContextTools(server: McpServer, factory: ContextFactory)
   server.registerTool(
     'get_indexing_status',
     { description: GET_INDEXING_STATUS_DESCRIPTION, inputSchema: statusInput },
-    async (args) => {
-      const absolutePath = requireAbsolute(args.path);
-      const state = indexingStates.get(absolutePath);
-      if (state) return text(describeState(absolutePath, state));
-
-      // No in-process record. Try to ask the vector DB whether a collection
-      // exists, but tolerate missing config — `get_indexing_status` should
-      // remain useful even before the user has set their embedding API key.
+    async () => {
       try {
-        const context = factory.get();
-        const has = await context.hasIndex(absolutePath);
-        return text(
-          has
-            ? `Index exists for ${absolutePath} (no status from this session — created in a prior run).`
-            : `No index for ${absolutePath}. Use index_codebase to create one.`
-        );
-      } catch (err) {
-        if (err instanceof EmbeddingNotConfiguredError) {
+        const root = requireWorkspace(workspaceRoot);
+        const state = indexingStates.get(root);
+        if (state) return text(describeState(root, state));
+
+        // No in-process record. Try to ask the vector DB whether a collection
+        // exists, but tolerate missing config — `get_indexing_status` should
+        // remain useful even before the user has set their embedding API key.
+        try {
+          const context = factory.get();
+          const has = await context.hasIndex(root);
           return text(
-            `No indexing run recorded in this session for ${absolutePath}. ` +
-              '(Embedding API key not configured, so prior-run state is unknown.)'
+            has
+              ? `Index exists for ${root} (no status from this session — created in a prior run).`
+              : `No index for ${root}. Use index_codebase to create one.`
           );
+        } catch (err) {
+          if (err instanceof EmbeddingNotConfiguredError) {
+            return text(
+              `No indexing run recorded in this session for ${root}. ` +
+                '(Embedding API key not configured, so prior-run state is unknown.)'
+            );
+          }
+          return text(`Status unavailable: ${errorMessage(err)}`, true);
         }
+      } catch (err) {
         return text(`Status unavailable: ${errorMessage(err)}`, true);
       }
     }
   );
 }
 
-function requireAbsolute(p: string): string {
-  if (!path.isAbsolute(p)) {
-    throw new Error(`Path must be absolute: ${p}`);
-  }
-  return p;
+function requireWorkspace(workspaceRoot: string | undefined): string {
+  if (!workspaceRoot) throw new NoWorkspaceError();
+  return workspaceRoot;
 }
 
 function buildExtensionFilter(exts: string[] | undefined): string | undefined {
@@ -341,11 +352,8 @@ function text(message: string, isError = false): {
 
 function errorMessage(err: unknown): string {
   if (err instanceof EmbeddingNotConfiguredError) return err.message;
+  if (err instanceof NoWorkspaceError) return err.message;
   if (err instanceof Error) return err.message;
   return String(err);
 }
 
-/** Test-only hook to reset the in-memory state map. */
-export function __resetIndexingStatesForTest(): void {
-  indexingStates.clear();
-}

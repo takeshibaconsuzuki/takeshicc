@@ -141,6 +141,11 @@
           "type": "string",
           "default": "text-embedding-3-small",
           "markdownDescription": "Embedding model name (e.g. `text-embedding-3-small`, `text-embedding-3-large`, or any model your OpenAI-compatible endpoint exposes)."
+        },
+        "takeshicc.search.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically re-index changed files in the workspace (~10s after a save). Only updates an existing index — won't auto-create one. Disable to control embedding-API spend manually."
         }
       }
     }
