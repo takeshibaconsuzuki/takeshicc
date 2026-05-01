@@ -21,3 +21,16 @@ export class EventEmitter<T> {
 }
 
 export type Disposable = { dispose(): void };
+
+export const workspace = {
+  getConfiguration(_section?: string): { get<T>(key: string, defaultValue: T): T } {
+    return {
+      get<T>(_key: string, defaultValue: T): T {
+        return defaultValue;
+      },
+    };
+  },
+  onDidChangeConfiguration(_listener: (e: unknown) => void): Disposable {
+    return { dispose() {} };
+  },
+};

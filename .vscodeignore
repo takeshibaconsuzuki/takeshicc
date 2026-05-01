@@ -4,7 +4,6 @@
 src/**
 test/**
 out/**
-node_modules/**
 .node/**
 .gitignore
 .gitattributes
@@ -20,3 +19,46 @@ package-lock.json
 CLAUDE.md
 CLAUDE.local.md
 !dist/**
+
+# Block all of node_modules by default. The bundle in dist/extension.js
+# already inlines pure-JS deps via esbuild; the only modules we need to
+# ship are the native ones marked external in esbuild.js (tree-sitter*),
+# plus their runtime transitive deps. Re-include those explicitly.
+node_modules/**
+!node_modules/tree-sitter/**
+!node_modules/tree-sitter-c-sharp/**
+!node_modules/tree-sitter-cpp/**
+!node_modules/tree-sitter-go/**
+!node_modules/tree-sitter-java/**
+!node_modules/tree-sitter-javascript/**
+!node_modules/tree-sitter-python/**
+!node_modules/tree-sitter-rust/**
+!node_modules/tree-sitter-scala/**
+!node_modules/tree-sitter-typescript/**
+!node_modules/node-addon-api/**
+!node_modules/node-gyp-build/**
+
+# Within the tree-sitter packages, node-gyp-build loads from prebuilds/
+# at runtime, so the C parser sources, build configs, and grammar JSON
+# are not needed in the .vsix. Strip them to keep package size sane.
+node_modules/tree-sitter-*/src/**
+node_modules/tree-sitter-*/typescript/src/**
+node_modules/tree-sitter-*/tsx/src/**
+node_modules/tree-sitter-*/grammar.js
+node_modules/tree-sitter-*/binding.gyp
+node_modules/tree-sitter-*/queries/**
+node_modules/tree-sitter-*/common/**
+node_modules/tree-sitter-*/*.wasm
+node_modules/tree-sitter-*/tree-sitter.json
+
+# Generic prune of doc/test/CI noise inside any included node_modules dir.
+node_modules/**/*.md
+node_modules/**/CHANGELOG*
+node_modules/**/.github/**
+node_modules/**/.npmignore
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/__tests__/**
+node_modules/**/example/**
+node_modules/**/examples/**
+node_modules/**/docs/**

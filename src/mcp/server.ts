@@ -3,6 +3,8 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { ContextFactory } from './context';
+import { registerContextTools } from './contextTools';
 
 export const MCP_TOKEN_HEADER = 'x-takeshicc-mcp-token';
 export const MCP_PATH = '/mcp';
@@ -27,9 +29,11 @@ export class McpHttpServer implements vscode.Disposable {
   private readonly httpServer: http.Server;
   private readonly _token = crypto.randomBytes(32).toString('hex');
   private readonly portPromise: Promise<number>;
+  private readonly contextFactory: ContextFactory;
   private disposed = false;
 
   constructor() {
+    this.contextFactory = new ContextFactory();
     this.httpServer = http.createServer((req, res) => {
       void this.handle(req, res);
     });
@@ -73,7 +77,7 @@ export class McpHttpServer implements vscode.Disposable {
       return;
     }
 
-    const server = buildMcpServer();
+    const server = buildMcpServer(this.contextFactory);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -104,6 +108,7 @@ export class McpHttpServer implements vscode.Disposable {
   dispose(): void {
     this.disposed = true;
     this.httpServer.close();
+    this.contextFactory.dispose();
   }
 }
 
@@ -111,21 +116,13 @@ export class McpHttpServer implements vscode.Disposable {
  * Construct a fresh McpServer with the takeshicc tool surface. Called per request
  * because stateless transports must not be reused.
  */
-function buildMcpServer(): McpServer {
+function buildMcpServer(contextFactory: ContextFactory): McpServer {
   const server = new McpServer({
     name: 'takeshicc',
     version: '0.0.1',
   });
 
-  server.registerTool(
-    'ping',
-    {
-      description: 'Returns "pong". Skeleton tool — replace with real takeshicc tools.',
-    },
-    async () => ({
-      content: [{ type: 'text', text: 'pong' }],
-    })
-  );
+  registerContextTools(server, contextFactory);
 
   return server;
 }

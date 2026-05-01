@@ -40,6 +40,26 @@ The emoji is prefixed to the session label — always visible, even when the row
 
 **Known gap:** hooks only fire for sessions started *after* the extension has written `settings.local.json`. A session started before the extension activated stays 🟢/no-prefix until you quit and re-run `claude` in that terminal — which is almost always what you want, since such sessions are also untracked for terminal correlation. A window reload has the same effect.
 
+### 4. Built-in MCP server (claude-context tools)
+
+On activation the extension also stands up a loopback-only HTTP MCP server backed by the official `@modelcontextprotocol/sdk` (`StreamableHTTPServerTransport`, stateless mode — a fresh `McpServer` and transport are constructed per request, per the SDK's stateless-mode guidance), and writes a `mcpServers.takeshicc` entry into `~/.claude.json` so the running `claude` process auto-discovers it. Same security model as the hook server: bound to `127.0.0.1` on a random OS-assigned port, gated by a per-activation 32-byte token in the `x-takeshicc-mcp-token` header. The URL is tagged `?source=takeshicc` so we only ever overwrite our own slot — sibling MCP servers and unrelated `~/.claude.json` keys are preserved. On `deactivate()` the slot is removed (best-effort).
+
+The server exposes four tools:
+
+- `index_codebase`, `search_code`, `clear_index`, `get_indexing_status` — thin wrappers around `@zilliz/claude-context-core`'s `Context` class (`indexCodebase` / `semanticSearch` / `clearIndex` / `hasIndex`). Tool names, descriptions, and JSON-Schema input shapes match `@zilliz/claude-context-mcp@0.1.11` byte-for-byte (modulo two cosmetic SDK-emitted fields — `$schema` and `execution.taskSupport` — that don't affect agent behavior). A regression test (`test/upstreamParity.test.ts`) snapshot-asserts this so drift is caught the next time upstream changes.
+
+Embedding is OpenAI-compatible. Configure it in VS Code settings:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `takeshicc.embedding.apiKey` | _(empty)_ | Required. |
+| `takeshicc.embedding.baseURL` | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint (Ollama, LiteLLM, Azure, …). |
+| `takeshicc.embedding.model` | `text-embedding-3-small` | Any model your endpoint exposes. |
+
+The factory rebuilds its `Context` whenever these settings change, so a fresh API key takes effect without a window reload.
+
+**Vector DB seam.** The `claude-context` tools currently delegate to a `NullVectorDatabase` stub — every write throws `"vector DB not configured"`, and `hasIndex` reports `false`. A real backend will be injected via `ContextFactory.setVectorDatabaseFactory()` in a follow-up; until then `index_codebase` and `search_code` fail at call-time. The tools are still advertised with full schemas so an agent can discover them and surface the configuration gap rather than silently no-oping.
+
 ## Install
 
 ```bash
@@ -87,7 +107,9 @@ npm run package      # production build (minified)
 npm run vsix         # production build + package .vsix
 ```
 
-Unit tests live under `test/` and cover the pure helpers: `buildReference` (selection → `@path#Lx-Ly`), `parseClaudeCommand` (shell command → invocation kind), `mergeHooks`/`removeHooks` (settings.local.json manipulation), `HookStateMachine` (hook event → session status transitions), and `formatRelativeTime`. Anything that touches the `vscode` API or hits the filesystem is not unit-tested; verify it manually in the Extension Development Host (`F5` inside the project). `vscode` is stubbed in `test/_stubs/vscode.ts` so pure modules can still import `EventEmitter` without pulling in the real API.
+Unit tests live under `test/` and cover the pure helpers: `buildReference` (selection → `@path#Lx-Ly`), `parseClaudeCommand` (shell command → invocation kind), `mergeHooks`/`removeHooks` (`settings.local.json` manipulation), `mergeMcp`/`removeMcp` (`~/.claude.json` manipulation), `HookStateMachine` (hook event → session status transitions), and `formatRelativeTime`. Two integration tests (`test/mcpServer.integration.test.ts`, `test/upstreamParity.test.ts`) boot the real `McpHttpServer` on a loopback port and exercise it via JSON-RPC over HTTP — covering auth, the `tools/list` surface, and tool-call error paths. Anything that touches the `vscode` API beyond config reads, or hits the filesystem, is not unit-tested; verify it manually in the Extension Development Host (`F5` inside the project). `vscode` is stubbed in `test/_stubs/vscode.ts` so pure modules can still import `EventEmitter` and call `workspace.getConfiguration` without pulling in the real API.
+
+**Bundle / native dependencies.** `@zilliz/claude-context-core` eagerly `require`s `@zilliz/milvus2-sdk-node` and `faiss-node` at module load, both of which ship `.node` binaries esbuild can't bundle. Since we only use `NullVectorDatabase`, `esbuild.js` aliases both packages to `src/mcp/milvusStub.js` — a Proxy that throws on any property access — so the bundle resolves without them. The tree-sitter grammars (also `.node` binaries) remain real externals and are loaded at runtime from the colocated `node_modules`. Resulting `dist/extension.js` is ~3.3 MB. When a real vector backend is wired in via `ContextFactory.setVectorDatabaseFactory()`, drop the alias for whichever SDK that backend needs.
 
 ## Known limitations
 
@@ -96,5 +118,6 @@ Unit tests live under `test/` and cover the pure helpers: `buildReference` (sele
 - **Sessions from sibling git worktrees are included** (the SDK's `listSessions` default). Usually what you want; not currently configurable.
 - **Non-`file://` editors are ignored** by the reference command (untitled, remote, notebooks).
 - **Status relies on hooks registered in `.claude/settings.local.json`** — if the file isn't writable (permissions, read-only mount), the sidebar falls back to showing every session as inactive.
-- **Multiple VS Code windows on the same workspace overwrite each other's hook port.** Last writer wins; the other window's server still runs but stops receiving events. Reload the losing window to re-register.
+- **Multiple VS Code windows on the same workspace overwrite each other's hook port.** Last writer wins; the other window's server still runs but stops receiving events. Reload the losing window to re-register. The MCP server has the same property against `~/.claude.json` — the most recently activated window owns the `mcpServers.takeshicc` slot.
+- **`claude-context` tools are non-functional until a vector DB backend is injected.** `NullVectorDatabase` fails fast on every write and reports no existing indexes. `index_codebase` and `search_code` return clear error messages rather than crashing.
 - **Session titles are truncated to 40 characters.** VS Code's TreeView has no grid layout — long labels push descriptions off-screen, so titles are hard-truncated to guarantee the age/timestamp stays visible. Full title is in the hover tooltip.

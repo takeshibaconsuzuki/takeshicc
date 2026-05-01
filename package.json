@@ -122,6 +122,27 @@
           "group": "navigation@2"
         }
       ]
+    },
+    "configuration": {
+      "title": "Takeshi CC",
+      "properties": {
+        "takeshicc.embedding.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for the OpenAI-compatible embedding endpoint used by `claude-context` indexing/search tools. Stored in VS Code settings — consider using a settings sync exclusion or a workspace-only override for shared machines.",
+          "scope": "machine-overridable"
+        },
+        "takeshicc.embedding.baseURL": {
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "markdownDescription": "Base URL of the OpenAI-compatible embedding endpoint (e.g. `https://api.openai.com/v1`, `http://localhost:11434/v1` for Ollama)."
+        },
+        "takeshicc.embedding.model": {
+          "type": "string",
+          "default": "text-embedding-3-small",
+          "markdownDescription": "Embedding model name (e.g. `text-embedding-3-small`, `text-embedding-3-large`, or any model your OpenAI-compatible endpoint exposes)."
+        }
+      }
     }
   },
   "scripts": {
@@ -130,7 +151,7 @@
     "package": "node esbuild.js --production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "vsix": "npm run package && vsce package --no-dependencies"
+    "vsix": "npm run package && vsce package"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -142,6 +163,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@zilliz/claude-context-core": "^0.1.11"
   }
 }
