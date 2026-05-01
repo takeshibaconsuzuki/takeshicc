@@ -68,6 +68,20 @@
         "key": "ctrl+`",
         "mac": "ctrl+`",
         "when": "panelVisible && !panelMaximized"
+      },
+      {
+        "command": "workbench.action.terminal.sendSequence",
+        "key": "pageup",
+        "mac": "pageup",
+        "args": { "text": "\u001b[5~" },
+        "when": "terminalFocus"
+      },
+      {
+        "command": "workbench.action.terminal.sendSequence",
+        "key": "pagedown",
+        "mac": "pagedown",
+        "args": { "text": "\u001b[6~" },
+        "when": "terminalFocus"
       }
     ],
     "viewsContainers": {
