@@ -6,7 +6,8 @@ const watch = process.argv.includes('--watch');
 
 // Native modules ship `.node` binaries that esbuild cannot bundle. They must be
 // resolved at runtime from node_modules colocated with the .vsix, so we keep
-// them external. Pull in via `@zilliz/claude-context-core`.
+// them external. Tree-sitter packages come in via `@zilliz/claude-context-core`;
+// `@lancedb/lancedb` is dynamically loaded by the vendored LanceDB backend.
 const NATIVE_EXTERNALS = [
   'tree-sitter',
   'tree-sitter-c-sharp',
@@ -18,6 +19,19 @@ const NATIVE_EXTERNALS = [
   'tree-sitter-rust',
   'tree-sitter-scala',
   'tree-sitter-typescript',
+  '@lancedb/lancedb',
+  '@lancedb/lancedb-darwin-arm64',
+  '@lancedb/lancedb-darwin-x64',
+  '@lancedb/lancedb-linux-x64-gnu',
+  '@lancedb/lancedb-linux-x64-musl',
+  '@lancedb/lancedb-linux-arm64-gnu',
+  '@lancedb/lancedb-linux-arm64-musl',
+  '@lancedb/lancedb-win32-x64-msvc',
+  '@lancedb/lancedb-win32-arm64-msvc',
+  // apache-arrow is a peer dep of @lancedb/lancedb. Keeping it external
+  // mirrors how lancedb resolves it at runtime; it would otherwise be
+  // duplicated by esbuild bundling and break instanceof checks.
+  'apache-arrow',
 ];
 
 // claude-context-core eagerly requires @zilliz/milvus2-sdk-node and faiss-node

@@ -1,3 +1,5 @@
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
   Context,
@@ -6,6 +8,19 @@ import {
   type VectorDatabase,
 } from '@zilliz/claude-context-core';
 import { NullVectorDatabase } from './nullVectorDb';
+import { LanceDBVectorDatabase } from './vendor/lancedb-vectordb';
+
+const TAKESHICC_DIR = '.takeshicc';
+const LANCEDB_DIR = `${TAKESHICC_DIR}/lancedb`;
+const GITIGNORE_ENTRY = `${TAKESHICC_DIR}/`;
+
+// `Context.findIgnoreFiles` greedily picks up every `.<name>ignore` file in
+// the workspace root and merges them into the indexer's ignore set. That's
+// fine for `.gitignore`, but `.vscodeignore` is a vsce-packaging file that
+// commonly globs out `src/**` and `test/**` — so the indexer ends up
+// excluding the whole codebase. Skip it. Other ignore files (.gitignore,
+// .contextignore, .npmignore, …) still flow through unchanged.
+patchSkipVscodeignore();
 
 export interface EmbeddingSettings {
   apiKey: string;
@@ -50,13 +65,14 @@ function buildEmbedding(settings: EmbeddingSettings): Embedding {
  * embedding settings change so a fresh API key / model takes effect without
  * a window reload.
  *
- * The vectorDatabase seam is currently filled with NullVectorDatabase — swap
- * it via setVectorDatabaseFactory() when the real backend lands.
+ * Defaults to a LanceDB backend rooted at `<workspace>/.takeshicc/lancedb`.
+ * Falls back to NullVectorDatabase when no workspace folder is open so
+ * the MCP server still loads cleanly. Override via setVectorDatabaseFactory().
  */
 export class ContextFactory implements vscode.Disposable {
   private context: Context | null = null;
   private lastSettingsKey: string | null = null;
-  private vectorDatabaseFactory: () => VectorDatabase = () => new NullVectorDatabase();
+  private vectorDatabaseFactory: () => VectorDatabase = defaultVectorDatabaseFactory;
   private readonly configSub: vscode.Disposable;
 
   constructor() {
@@ -97,5 +113,85 @@ export class ContextFactory implements vscode.Disposable {
   dispose(): void {
     this.configSub.dispose();
     this.context = null;
+  }
+}
+
+/**
+ * Build the workspace-scoped LanceDB backend. Without a workspace folder
+ * there's no obvious place to persist files, so fall back to the null DB
+ * (which surfaces a clear "not configured" error on first use).
+ */
+function defaultVectorDatabaseFactory(): VectorDatabase {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) return new NullVectorDatabase();
+  void ensureGitignore(workspaceRoot);
+  return new LanceDBVectorDatabase({ uri: path.join(workspaceRoot, LANCEDB_DIR) });
+}
+
+/**
+ * Append `.takeshicc/` to the workspace `.gitignore` so the local LanceDB
+ * files don't get committed. Idempotent: skips if the entry is already
+ * present (treating any line that, after stripping a leading `/` and
+ * trailing `/`, equals `.takeshicc` as a match — covers `.takeshicc`,
+ * `.takeshicc/`, `/.takeshicc`, `/.takeshicc/`).
+ *
+ * Only acts when the workspace looks like a git checkout (`.git` exists)
+ * so we don't materialize a `.gitignore` in non-git directories.
+ * Best-effort: any failure (permission denied, etc.) is silently swallowed.
+ */
+/**
+ * Wrap `Context.prototype.findIgnoreFiles` once so its returned list never
+ * includes `.vscodeignore`. Idempotent — re-imports of this module won't
+ * stack wrappers (the sentinel uses `Symbol.for`, so it's stable across
+ * module instances).
+ */
+function patchSkipVscodeignore(): void {
+  const flag = Symbol.for('takeshicc.skipVscodeignore');
+  const proto = Context.prototype as unknown as Record<PropertyKey, unknown>;
+  if (proto[flag]) return;
+
+  const original = proto['findIgnoreFiles'];
+  if (typeof original !== 'function') return;
+
+  proto['findIgnoreFiles'] = async function patched(
+    this: Context,
+    codebasePath: string
+  ): Promise<string[]> {
+    const files = (await (original as (p: string) => Promise<string[]>).call(
+      this,
+      codebasePath
+    )) ?? [];
+    return files.filter((f) => path.basename(f) !== '.vscodeignore');
+  };
+  proto[flag] = true;
+}
+
+async function ensureGitignore(workspaceRoot: string): Promise<void> {
+  try {
+    try {
+      await fs.stat(path.join(workspaceRoot, '.git'));
+    } catch {
+      return;
+    }
+
+    const gitignorePath = path.join(workspaceRoot, '.gitignore');
+    let existing = '';
+    try {
+      existing = await fs.readFile(gitignorePath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return;
+    }
+
+    const alreadyIgnored = existing.split(/\r?\n/).some((line) => {
+      const trimmed = line.trim().replace(/^\//, '').replace(/\/$/, '');
+      return trimmed === TAKESHICC_DIR;
+    });
+    if (alreadyIgnored) return;
+
+    const prefix = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+    const block = `${prefix}# Added by takeshicc — local LanceDB index for code search.\n${GITIGNORE_ENTRY}\n`;
+    await fs.appendFile(gitignorePath, block, 'utf8');
+  } catch {
+    // Best-effort. Failing to update .gitignore must not block indexing.
   }
 }

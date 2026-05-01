@@ -22,8 +22,9 @@ CLAUDE.local.md
 
 # Block all of node_modules by default. The bundle in dist/extension.js
 # already inlines pure-JS deps via esbuild; the only modules we need to
-# ship are the native ones marked external in esbuild.js (tree-sitter*),
-# plus their runtime transitive deps. Re-include those explicitly.
+# ship are the native ones marked external in esbuild.js (tree-sitter*,
+# @lancedb/lancedb), plus their runtime transitive deps. Re-include those
+# explicitly.
 node_modules/**
 !node_modules/tree-sitter/**
 !node_modules/tree-sitter-c-sharp/**
@@ -37,6 +38,31 @@ node_modules/**
 !node_modules/tree-sitter-typescript/**
 !node_modules/node-addon-api/**
 !node_modules/node-gyp-build/**
+
+# LanceDB runtime: the JS wrapper, a runtime dep (reflect-metadata), and
+# the platform-specific native binary. npm only installs the native
+# package matching the host arch (optionalDependencies), so the .vsix is
+# necessarily host-arch-only — repackage on each target platform.
+!node_modules/@lancedb/lancedb/**
+!node_modules/@lancedb/lancedb-darwin-arm64/**
+!node_modules/@lancedb/lancedb-darwin-x64/**
+!node_modules/@lancedb/lancedb-linux-x64-gnu/**
+!node_modules/@lancedb/lancedb-linux-x64-musl/**
+!node_modules/@lancedb/lancedb-linux-arm64-gnu/**
+!node_modules/@lancedb/lancedb-linux-arm64-musl/**
+!node_modules/@lancedb/lancedb-win32-x64-msvc/**
+!node_modules/@lancedb/lancedb-win32-arm64-msvc/**
+!node_modules/reflect-metadata/**
+
+# apache-arrow is lancedb's peer dependency. Its main entrypoint pulls
+# in `tslib` and `flatbuffers` at runtime; the `bin/arrow2csv.js` CLI
+# requires `command-line-args`/`command-line-usage`/`json-bignum`, but
+# nothing in the lancedb path loads it, so we drop bin/ to avoid
+# shipping those transitive deps.
+!node_modules/apache-arrow/**
+node_modules/apache-arrow/bin/**
+!node_modules/tslib/**
+!node_modules/flatbuffers/**
 
 # Within the tree-sitter packages, node-gyp-build loads from prebuilds/
 # at runtime, so the C parser sources, build configs, and grammar JSON

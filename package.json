@@ -154,6 +154,7 @@
     "vsix": "npm run package && vsce package"
   },
   "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^3.2.0",
@@ -163,7 +164,10 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
+    "@lancedb/lancedb": "^0.27.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@zilliz/claude-context-core": "^0.1.11"
+    "@zilliz/claude-context-core": "^0.1.11",
+    "apache-arrow": "^18.1.0",
+    "fs-extra": "^11.3.4"
   }
 }

@@ -5,3 +5,5 @@ dist/
 .vscode-test/
 CLAUDE.local.md
 .claude/settings.local.json
+# Added by takeshicc — local LanceDB index for code search.
+.takeshicc/
