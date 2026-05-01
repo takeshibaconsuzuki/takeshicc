@@ -72,6 +72,7 @@ function buildEmbedding(settings: EmbeddingSettings): Embedding {
  */
 export class ContextFactory implements vscode.Disposable {
   private context: Context | null = null;
+  private currentVectorDatabase: VectorDatabase | null = null;
   private lastSettingsKey: string | null = null;
   private vectorDatabaseFactory: () => VectorDatabase = defaultVectorDatabaseFactory;
   private readonly configSub: vscode.Disposable;
@@ -103,17 +104,59 @@ export class ContextFactory implements vscode.Disposable {
     const settings = readEmbeddingSettings();
     const key = `${settings.apiKey ? 'set' : 'unset'}|${settings.baseURL}|${settings.model}`;
     if (this.context && this.lastSettingsKey === key) return this.context;
+    const vectorDatabase = this.vectorDatabaseFactory();
+    this.currentVectorDatabase = vectorDatabase;
     this.context = new Context({
       embedding: buildEmbedding(settings),
-      vectorDatabase: this.vectorDatabaseFactory(),
+      vectorDatabase,
     });
     this.lastSettingsKey = key;
     return this.context;
   }
 
+  /**
+   * Authoritative on-disk counts for a workspace's collection — used to
+   * seed the indexing-state baseline when the in-memory map has nothing
+   * (cold activation against an existing index from a prior session).
+   *
+   * Returns `null` when the embedding API key isn't configured, the
+   * collection doesn't exist yet, or the row-count query fails. Callers
+   * treat null as "unknown" and fall back to whatever they had.
+   *
+   * Files come from a distinct-relativePath query; chunks from
+   * `getCollectionRowCount`. Both run once per cold start, against an
+   * embedded local DB — cost is negligible.
+   */
+  async getDiskCounts(
+    workspaceRoot: string
+  ): Promise<{ files: number; chunks: number } | null> {
+    let context: Context;
+    try {
+      context = this.get();
+    } catch {
+      return null;
+    }
+    const db = this.currentVectorDatabase;
+    if (!db) return null;
+    const collection = context.getCollectionName(workspaceRoot);
+    try {
+      if (!(await db.hasCollection(collection))) return null;
+      const chunks = await db.getCollectionRowCount(collection);
+      if (chunks < 0) return null;
+      const rows = await db.query(collection, '', ['relativePath'], 100_000);
+      const files = new Set(
+        rows.map((r) => r.relativePath as string).filter(Boolean)
+      ).size;
+      return { files, chunks };
+    } catch {
+      return null;
+    }
+  }
+
   dispose(): void {
     this.configSub.dispose();
     this.context = null;
+    this.currentVectorDatabase = null;
   }
 }
 

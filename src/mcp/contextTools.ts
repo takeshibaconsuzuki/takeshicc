@@ -270,10 +270,28 @@ export function registerContextTools(
         try {
           const context = factory.get();
           const has = await context.hasIndex(root);
+          if (!has) {
+            return text(`No index for ${root}. Use index_codebase to create one.`);
+          }
+          // Prior-run index — pull authoritative counts off disk so the
+          // reply matches what the index actually contains, instead of a
+          // generic "exists" message.
+          const counts = await factory.getDiskCounts(root);
+          if (counts) {
+            indexingStates.set(root, {
+              phase: 'completed',
+              finishedAt: Date.now(),
+              indexedFiles: counts.files,
+              totalChunks: counts.chunks,
+              status: 'completed',
+            });
+            return text(
+              `Index ready for ${root}: ${counts.files} files, ` +
+                `${counts.chunks} chunks (status: completed).`
+            );
+          }
           return text(
-            has
-              ? `Index exists for ${root} (no status from this session — created in a prior run).`
-              : `No index for ${root}. Use index_codebase to create one.`
+            `Index exists for ${root} (no status from this session — created in a prior run).`
           );
         } catch (err) {
           if (err instanceof EmbeddingNotConfiguredError) {

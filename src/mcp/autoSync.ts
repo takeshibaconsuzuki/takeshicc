@@ -134,9 +134,30 @@ export class AutoSync implements vscode.Disposable {
 
       // Seed running state from the prior completed snapshot so live
       // counts decrement / increment from a real baseline instead of zero.
-      const prior = indexingStates.get(this.workspaceRoot);
-      const priorFiles = prior?.phase === 'completed' ? prior.indexedFiles : 0;
-      const priorChunks = prior?.phase === 'completed' ? prior.totalChunks : 0;
+      // On cold activation there's no in-memory baseline — pull
+      // authoritative counts off disk so a no-op sync doesn't overwrite
+      // the state with `{ 0, 0 }`.
+      let prior = indexingStates.get(this.workspaceRoot);
+      let priorFiles = 0;
+      let priorChunks = 0;
+      if (prior?.phase === 'completed') {
+        priorFiles = prior.indexedFiles;
+        priorChunks = prior.totalChunks;
+      } else {
+        const counts = await this.factory.getDiskCounts(this.workspaceRoot);
+        if (counts) {
+          priorFiles = counts.files;
+          priorChunks = counts.chunks;
+          prior = {
+            phase: 'completed',
+            finishedAt: Date.now(),
+            indexedFiles: counts.files,
+            totalChunks: counts.chunks,
+            status: 'completed',
+          };
+          indexingStates.set(this.workspaceRoot, prior);
+        }
+      }
       const startedAt = Date.now();
       this.log.appendLine(`autoSync: starting ${this.workspaceRoot}`);
       indexingStates.set(this.workspaceRoot, {
