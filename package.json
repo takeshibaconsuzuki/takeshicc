@@ -77,14 +77,18 @@
         "command": "workbench.action.terminal.sendSequence",
         "key": "pageup",
         "mac": "pageup",
-        "args": { "text": "\u001b[5~" },
+        "args": {
+          "text": "\u001b[5~"
+        },
         "when": "terminalFocus"
       },
       {
         "command": "workbench.action.terminal.sendSequence",
         "key": "pagedown",
         "mac": "pagedown",
-        "args": { "text": "\u001b[6~" },
+        "args": {
+          "text": "\u001b[6~"
+        },
         "when": "terminalFocus"
       }
     ],
@@ -137,6 +141,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.114"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.114",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

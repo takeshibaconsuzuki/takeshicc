@@ -7,6 +7,8 @@ import { parseClaudeCommand } from './parseClaudeCommand';
 import { HookServer, type HookEvent } from './hooks/server';
 import { HookStateMachine } from './hooks/stateMachine';
 import { installHooks, uninstallHooks } from './hooks/settings';
+import { McpHttpServer } from './mcp/server';
+import { registerMcpServer, unregisterMcpServer } from './mcp/settings';
 
 const AUTO_REFRESH_MS = 30_000;
 const NEW_CHAT_POLL_MS = 1_000;
@@ -24,6 +26,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const tracker = new TerminalTracker();
   const hookStates = new HookStateMachine();
   const hookServer = new HookServer();
+  const mcpServer = new McpHttpServer();
   const provider = new SessionTreeDataProvider(service, tracker, hookStates);
 
   context.subscriptions.push(
@@ -38,12 +41,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   hooksReady = bootstrapHooks(hookServer, workspaceRoot, log);
+  void bootstrapMcp(mcpServer, log);
 
   context.subscriptions.push(
     log,
     tracker,
     hookStates,
     hookServer,
+    mcpServer,
     provider,
     vscode.commands.registerCommand(
       'takeshicc.insertReference',
@@ -121,6 +126,11 @@ export async function deactivate(): Promise<void> {
       // Best-effort — we're shutting down.
     }
   }
+  try {
+    await unregisterMcpServer();
+  } catch {
+    // Best-effort — we're shutting down.
+  }
 }
 
 async function bootstrapHooks(
@@ -141,6 +151,19 @@ async function bootstrapHooks(
     void vscode.window.showWarningMessage(
       `Takeshi CC: failed to install Claude Code hooks (${(err as Error).message}). Per-session status in the sidebar will be unavailable.`
     );
+  }
+}
+
+async function bootstrapMcp(
+  server: McpHttpServer,
+  log: vscode.OutputChannel
+): Promise<void> {
+  try {
+    const { port, token } = await server.getConfig();
+    const file = await registerMcpServer({ port, token });
+    log.appendLine(`bootstrapMcp: port=${port}, settings=${file}`);
+  } catch (err) {
+    log.appendLine(`bootstrapMcp: FAILED — ${(err as Error).message}`);
   }
 }
 
