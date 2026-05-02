@@ -331,7 +331,7 @@ function formatResults(
   results.forEach((r, i) => {
     lines.push('');
     lines.push(
-      `#${i + 1}  ${r.relativePath}:${r.startLine}-${r.endLine}  (${r.language}, score=${r.score.toFixed(3)})`
+      `#${i + 1}  ${r.relativePath}:${r.startLine}-${r.endLine}  (${r.language})`
     );
     lines.push('```' + r.language);
     lines.push(r.content);

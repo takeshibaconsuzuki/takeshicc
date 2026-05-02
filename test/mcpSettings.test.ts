@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { mergeMcp, removeMcp, SERVER_NAME } from '../src/mcp/settings';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  mergeMcp,
+  removeMcp,
+  normalizeProjectKey,
+  pruneStaleVariants,
+  SERVER_NAME,
+} from '../src/mcp/settings';
 
 const PORT = 12345;
 const TOKEN = 'deadbeef';
@@ -171,5 +177,111 @@ describe('removeMcp', () => {
   it('no-op when the target workspace has no project entry', () => {
     const input = { projects: { '/other': { allowedTools: ['Read'] } } };
     expect(removeMcp(input, WS)).toEqual(input);
+  });
+});
+
+describe('normalizeProjectKey', () => {
+  const realPlatform = process.platform;
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: realPlatform });
+  });
+
+  function setPlatform(p: NodeJS.Platform) {
+    Object.defineProperty(process, 'platform', { value: p });
+  }
+
+  it('uppercases drive letter and converts backslashes on Windows', () => {
+    setPlatform('win32');
+    expect(normalizeProjectKey('e:\\Devel\\takeshicc')).toBe('E:/Devel/takeshicc');
+  });
+
+  it('leaves an already-normalized Windows path unchanged', () => {
+    setPlatform('win32');
+    expect(normalizeProjectKey('E:/Devel/takeshicc')).toBe('E:/Devel/takeshicc');
+  });
+
+  it('leaves POSIX paths untouched on POSIX', () => {
+    setPlatform('linux');
+    expect(normalizeProjectKey('/Users/test/proj')).toBe('/Users/test/proj');
+  });
+
+  it('does not transform paths on POSIX even with Windows-looking input', () => {
+    setPlatform('darwin');
+    expect(normalizeProjectKey('e:\\foo')).toBe('e:\\foo');
+  });
+});
+
+describe('pruneStaleVariants', () => {
+  const realPlatform = process.platform;
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: realPlatform });
+  });
+
+  it('removes our entry from a differently-cased Windows variant', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const canonical = 'E:/Devel/takeshicc';
+    const stale = 'e:\\Devel\\takeshicc';
+    const input = mergeMcp(null, 1111, 'old', stale);
+    const out = pruneStaleVariants(input, canonical) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+    expect(out.projects[stale].mcpServers).toBeUndefined();
+  });
+
+  it('preserves sibling MCP servers under a stale variant', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const canonical = 'E:/Devel/takeshicc';
+    const stale = 'e:\\Devel\\takeshicc';
+    const input = {
+      projects: {
+        [stale]: {
+          mcpServers: {
+            otherServer: { type: 'stdio', command: 'foo' },
+            [SERVER_NAME]: {
+              type: 'http',
+              url: 'http://127.0.0.1:1111/mcp?source=takeshicc',
+              headers: { 'x-takeshicc-mcp-token': 'old' },
+            },
+          },
+        },
+      },
+    };
+    const out = pruneStaleVariants(input, canonical) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+    const servers = out.projects[stale].mcpServers as Record<string, unknown>;
+    expect(servers[SERVER_NAME]).toBeUndefined();
+    expect(servers.otherServer).toEqual({ type: 'stdio', command: 'foo' });
+  });
+
+  it('does not touch the canonical key', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const canonical = 'E:/Devel/takeshicc';
+    const input = mergeMcp(null, 1111, 'tok', canonical);
+    const out = pruneStaleVariants(input, canonical) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+    const servers = out.projects[canonical].mcpServers as Record<string, unknown>;
+    expect(servers[SERVER_NAME]).toBeDefined();
+  });
+
+  it('does not touch unrelated project keys', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const canonical = 'E:/Devel/takeshicc';
+    const input = mergeMcp(null, 1111, 'tok', 'E:/Devel/other');
+    const out = pruneStaleVariants(input, canonical) as {
+      projects: Record<string, Record<string, unknown>>;
+    };
+    const servers = out.projects['E:/Devel/other'].mcpServers as Record<
+      string,
+      unknown
+    >;
+    expect(servers[SERVER_NAME]).toBeDefined();
+  });
+
+  it('no-op on POSIX where keys are already canonical', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const input = mergeMcp(null, 1111, 'tok', '/Users/test/proj');
+    expect(pruneStaleVariants(input, '/Users/test/proj')).toEqual(input);
   });
 });

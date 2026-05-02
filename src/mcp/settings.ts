@@ -36,7 +36,9 @@ type Json =
 export async function registerMcpServer(params: McpRegisterParams): Promise<string> {
   const file = path.join(os.homedir(), '.claude.json');
   const existing = await readJson(file);
-  const merged = mergeMcp(existing, params.port, params.token, params.workspaceRoot);
+  const key = normalizeProjectKey(params.workspaceRoot);
+  const pruned = pruneStaleVariants(existing, key);
+  const merged = mergeMcp(pruned, params.port, params.token, key);
   await fs.writeFile(file, JSON.stringify(merged, null, 2) + '\n', 'utf8');
   return file;
 }
@@ -50,8 +52,43 @@ export async function unregisterMcpServer(params: McpUnregisterParams): Promise<
     return;
   }
   if (existing === null) return;
-  const cleaned = removeMcp(existing, params.workspaceRoot);
+  const key = normalizeProjectKey(params.workspaceRoot);
+  const pruned = pruneStaleVariants(existing, key);
+  const cleaned = removeMcp(pruned, key);
   await fs.writeFile(file, JSON.stringify(cleaned, null, 2) + '\n', 'utf8');
+}
+
+/**
+ * Claude Code keys `projects` in `~/.claude.json` by the cwd it was started
+ * in. On Windows that's an uppercase drive letter and forward slashes (e.g.
+ * `E:/Devel/proj`), but VS Code's `workspaceFolders[0].uri.fsPath` returns
+ * `e:\Devel\proj` — lowercase drive, backslashes. Writing under the VS Code
+ * form means Claude Code never finds our entry. Normalize to the Claude
+ * Code convention so the key matches.
+ */
+export function normalizeProjectKey(workspaceRoot: string): string {
+  if (process.platform !== 'win32') return workspaceRoot;
+  let out = workspaceRoot.replace(/\\/g, '/');
+  if (/^[a-z]:/.test(out)) out = out.charAt(0).toUpperCase() + out.slice(1);
+  return out;
+}
+
+/**
+ * Remove our entry from any project key that normalizes to `canonicalKey`
+ * but isn't equal to it — i.e., stale entries written by older builds under
+ * the wrong path form. Sibling MCP servers under those keys are preserved.
+ * Exported for unit tests.
+ */
+export function pruneStaleVariants(settings: Json, canonicalKey: string): Json {
+  if (!isObject(settings)) return settings;
+  if (!isObject(settings.projects)) return settings;
+  let result: Json = settings;
+  for (const k of Object.keys(settings.projects)) {
+    if (k === canonicalKey) continue;
+    if (normalizeProjectKey(k) !== canonicalKey) continue;
+    result = removeMcp(result, k);
+  }
+  return result;
 }
 
 /**
