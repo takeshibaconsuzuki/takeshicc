@@ -91,7 +91,8 @@
       "takeshicc": [
         {
           "id": "takeshicc.sessions",
-          "name": "Sessions"
+          "name": "Sessions",
+          "type": "webview"
         }
       ]
     },
@@ -112,6 +113,13 @@
     "configuration": {
       "title": "Takeshi CC",
       "properties": {
+        "takeshicc.sessions.tailLines": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 10,
+          "markdownDescription": "Number of lines of the most recent message to show under each session title in the sidebar. `0` hides the tail entirely. The tail is refreshed on the slow auto-refresh tick (~30s), not on every hook event."
+        },
         "takeshicc.layout.sidebarSizePx": {
           "type": "integer",
           "default": 480,

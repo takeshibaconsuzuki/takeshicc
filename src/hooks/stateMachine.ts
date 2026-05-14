@@ -20,9 +20,17 @@ export interface HookSessionState {
  * source for every session the sidebar shows. Sessions with no entry here
  * (never seeded, never heard a hook from) render as `inactive` — no emoji.
  */
+/**
+ * Payload of `onDidChange`. The new state for the affected session, or
+ * `undefined` when the session was cleared (SessionEnd / explicit clear).
+ * Subscribers can filter on `status` to react to specific transitions
+ * (e.g., trigger a tail refresh when a session turns green).
+ */
+export type HookStateChange = HookSessionState | undefined;
+
 export class HookStateMachine implements vscode.Disposable {
   private readonly states = new Map<string, HookSessionState>();
-  private readonly emitter = new vscode.EventEmitter<void>();
+  private readonly emitter = new vscode.EventEmitter<HookStateChange>();
   readonly onDidChange = this.emitter.event;
   private readonly now: () => number;
 
@@ -44,7 +52,7 @@ export class HookStateMachine implements vscode.Disposable {
    * last known state (usually idle/awaiting) would otherwise linger forever.
    */
   clear(sessionId: string): void {
-    if (this.states.delete(sessionId)) this.emitter.fire();
+    if (this.states.delete(sessionId)) this.emitter.fire(undefined);
   }
 
   /**
@@ -66,14 +74,14 @@ export class HookStateMachine implements vscode.Disposable {
     const prev = this.states.get(sessionId);
     if (prev && statesEqual(prev, next)) return;
     this.states.set(sessionId, next);
-    this.emitter.fire();
+    this.emitter.fire(next);
   }
 
   handle(event: HookEvent): void {
     const id = event.session_id;
 
     if (event.hook_event_name === 'SessionEnd') {
-      if (this.states.delete(id)) this.emitter.fire();
+      if (this.states.delete(id)) this.emitter.fire(undefined);
       return;
     }
 
@@ -120,7 +128,7 @@ export class HookStateMachine implements vscode.Disposable {
 
     if (statesEqual(prev, next)) return;
     this.states.set(id, next);
-    this.emitter.fire();
+    this.emitter.fire(next);
   }
 
   dispose(): void {

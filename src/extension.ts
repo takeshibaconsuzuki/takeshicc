@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import { buildReference } from './reference';
 import { resolveTargetTerminal, TerminalTracker } from './terminals';
 import { SessionService } from './sessions/service';
-import { SessionTreeDataProvider } from './sessions/provider';
+import { SessionsWebviewViewProvider } from './sessions/view';
 import { parseClaudeCommand } from './parseClaudeCommand';
 import { HookServer, type HookEvent } from './hooks/server';
 import { HookStateMachine } from './hooks/stateMachine';
@@ -33,7 +33,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const hookStates = new HookStateMachine();
   const hookServer = new HookServer();
   const mcpServer = new McpHttpServer(log);
-  const provider = new SessionTreeDataProvider(service, tracker, hookStates);
+  const provider = new SessionsWebviewViewProvider(
+    context.extensionUri,
+    service,
+    tracker,
+    hookStates,
+    workspaceRoot,
+    'takeshicc.openSession',
+    log
+  );
 
   context.subscriptions.push(
     hookServer.onEvent((e) => {
@@ -74,7 +82,11 @@ export function activate(context: vscode.ExtensionContext): void {
       'takeshicc.insertReference',
       insertReferenceCommand
     ),
-    vscode.window.registerTreeDataProvider('takeshicc.sessions', provider),
+    vscode.window.registerWebviewViewProvider(
+      SessionsWebviewViewProvider.viewType,
+      provider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    ),
     vscode.commands.registerCommand('takeshicc.refreshSessions', () =>
       provider.refresh()
     ),
@@ -347,7 +359,7 @@ async function openSessionCommand(
 
 async function newChatCommand(
   service: SessionService,
-  provider: SessionTreeDataProvider,
+  provider: SessionsWebviewViewProvider,
   tracker: TerminalTracker,
   hookStates: HookStateMachine,
   log: vscode.OutputChannel,
@@ -378,7 +390,7 @@ async function newChatCommand(
 async function attachNewSession(
   terminal: vscode.Terminal,
   service: SessionService,
-  provider: SessionTreeDataProvider,
+  provider: SessionsWebviewViewProvider,
   tracker: TerminalTracker,
   hookStates: HookStateMachine
 ): Promise<void> {
