@@ -40,28 +40,11 @@ The emoji is prefixed to the session label — always visible, even when the row
 
 **Known gap:** hooks only fire for sessions started *after* the extension has written `settings.local.json`. A session started before the extension activated stays 🟢/no-prefix until you quit and re-run `claude` in that terminal — which is almost always what you want, since such sessions are also untracked for terminal correlation. A window reload has the same effect.
 
-### 4. Built-in MCP server (claude-context tools)
+### 4. Built-in MCP server
 
 On activation the extension also stands up a loopback-only HTTP MCP server backed by the official `@modelcontextprotocol/sdk` (`StreamableHTTPServerTransport`, stateless mode — a fresh `McpServer` and transport are constructed per request, per the SDK's stateless-mode guidance), and writes a `projects.<workspaceRoot>.mcpServers.takeshicc` entry into `~/.claude.json` so the running `claude` process auto-discovers it. The entry is **per-project**, so the `takeshicc` server only appears in the workspace whose VS Code window is hosting the extension — Claude won't see takeshicc in unrelated projects. Same security model as the hook server: bound to `127.0.0.1` on a random OS-assigned port, gated by a per-activation 32-byte token in the `x-takeshicc-mcp-token` header. The URL is tagged `?source=takeshicc` so we only ever overwrite our own slot — sibling MCP servers and unrelated `~/.claude.json` keys are preserved. On `deactivate()` the slot is removed (best-effort). When no workspace folder is open the registration is skipped entirely.
 
-The server exposes four tools — `index_codebase`, `search_code`, `clear_index`, `get_indexing_status` — thin wrappers around `@zilliz/claude-context-core`'s `Context` class (`indexCodebase` / `semanticSearch` / `clearIndex` / `hasIndex`). The active workspace is fixed at server-construction time, so unlike `@zilliz/claude-context-mcp` upstream, none of the tools take a `path` argument — the agent just calls `search_code({ query })` and the tool resolves to the workspace root. Tool names, splitter / extension / ignore arguments, and limit semantics still mirror upstream so an agent that knows the upstream surface mostly just works.
-
-Embedding is OpenAI-compatible. Configure it in VS Code settings:
-
-| Setting | Default | Notes |
-|---|---|---|
-| `takeshicc.embedding.apiKey` | _(empty)_ | Required. |
-| `takeshicc.embedding.baseURL` | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint (Ollama, LiteLLM, Azure, …). |
-| `takeshicc.embedding.model` | `text-embedding-3-small` | Any model your endpoint exposes. |
-| `takeshicc.search.autoSync` | `true` | Automatically re-index changed files (~10s after a save). Only updates an existing index; won't auto-create one. |
-
-The factory rebuilds its `Context` whenever these settings change, so a fresh API key takes effect without a window reload.
-
-**Auto-sync.** When the workspace already has an index, a `vscode.workspace.createFileSystemWatcher('**/*')` debounces saves/creates/deletes by 10s and calls `Context.reindexByChange(workspaceRoot)` — which uses `claude-context-core`'s `FileSynchronizer` to compute `{ added, modified, removed }` and apply only that diff to the vector DB. On extension activation a single catch-up sync runs ~3s in to absorb edits made while the window was closed (branch switch, git pull, etc.). Cheap path-fragment filter (`node_modules/`, `.git/`, `dist/`, `out/`, `build/`, `.takeshicc/`, `.vscode-test/`, `coverage/`) short-circuits before paying the diff cost. Auto-sync skips when an `index_codebase` run is already in flight, when no index exists yet (avoids implicitly creating one and burning embedding tokens), and when the embedding API key isn't configured. Both `index_codebase` and auto-sync go through identical state transitions — `running` (with `currentFiles` / `currentChunks` updated live; chunks come from a hook on `LanceDBVectorDatabase.insert`/`delete`, files from the progress callback for full indexes or from `prior + added − removed` for syncs) → `completed { indexedFiles, totalChunks, status }`. `get_indexing_status` shows live counts mid-run and the durable totals afterward. Disable via `takeshicc.search.autoSync = false`.
-
-**Vector DB backend.** Indexing is backed by [LanceDB](https://lancedb.com/), an embedded local vector store. The implementation is vendored from [`danielbowne/claude-context`](https://github.com/danielbowne/claude-context) at `src/mcp/lancedb-vectordb.ts` (with imports rerouted to `@zilliz/claude-context-core`'s re-exported types and three interface methods added that post-date the upstream snapshot). Tables live at `<workspace>/.takeshicc/lancedb/` — on first use the extension also appends `.takeshicc/` to the workspace `.gitignore` (only when `.git` exists, idempotent). When no workspace folder is open, the factory falls back to `NullVectorDatabase` so the MCP server still loads cleanly; tools surface a clear error rather than crashing. Override the backend via `ContextFactory.setVectorDatabaseFactory()`.
-
-**`.vscodeignore` carve-out.** `@zilliz/claude-context-core` greedily treats every `.<name>ignore` file in the workspace root as an indexer ignore-list. That sweeps in `.vscodeignore` (a vsce packaging file) and excludes `src/**`, `test/**`, etc. — making the index empty for projects that ship a `.vsix`. `src/mcp/context.ts` monkey-patches `Context.prototype.findIgnoreFiles` once at module load to drop only `.vscodeignore` from the returned list; `.gitignore`, `.contextignore`, `.npmignore`, and friends still flow through unchanged.
+The server currently exposes no tools — kept as scaffolding for future additions.
 
 ## Install
 
@@ -110,15 +93,9 @@ npm run package      # production build (minified)
 npm run vsix         # production build + package .vsix
 ```
 
-Unit tests live under `test/` and cover the pure helpers: `buildReference` (selection → `@path#Lx-Ly`), `parseClaudeCommand` (shell command → invocation kind), `mergeHooks`/`removeHooks` (`settings.local.json` manipulation), `mergeMcp`/`removeMcp` (`~/.claude.json` manipulation), `HookStateMachine` (hook event → session status transitions), and `formatRelativeTime`. Two integration tests (`test/mcpServer.integration.test.ts`, `test/upstreamParity.test.ts`) boot the real `McpHttpServer` on a loopback port and exercise it via JSON-RPC over HTTP — covering auth, the `tools/list` surface, and tool-call error paths. Anything that touches the `vscode` API beyond config reads, or hits the filesystem, is not unit-tested; verify it manually in the Extension Development Host (`F5` inside the project). `vscode` is stubbed in `test/_stubs/vscode.ts` so pure modules can still import `EventEmitter` and call `workspace.getConfiguration` without pulling in the real API.
+Unit tests live under `test/` and cover the pure helpers: `buildReference` (selection → `@path#Lx-Ly`), `parseClaudeCommand` (shell command → invocation kind), `mergeHooks`/`removeHooks` (`settings.local.json` manipulation), `mergeMcp`/`removeMcp` (`~/.claude.json` manipulation), `HookStateMachine` (hook event → session status transitions), and `formatRelativeTime`. One integration test (`test/mcpServer.integration.test.ts`) boots the real `McpHttpServer` on a loopback port and exercises it via JSON-RPC over HTTP — covering auth and the (currently empty) `tools/list` surface. Anything that touches the `vscode` API beyond config reads, or hits the filesystem, is not unit-tested; verify it manually in the Extension Development Host (`F5` inside the project). `vscode` is stubbed in `test/_stubs/vscode.ts` so pure modules can still import `EventEmitter` and call `workspace.getConfiguration` without pulling in the real API.
 
-**Bundle / native dependencies.** Three categories of `.node` binaries esbuild can't bundle:
-
-- **Tree-sitter grammars** (used by the AST splitter). Real externals, loaded at runtime from the colocated `node_modules`.
-- **`@lancedb/lancedb`** plus its platform-specific binary package (e.g. `@lancedb/lancedb-darwin-arm64`) and the `apache-arrow` peer dep. All marked external in `esbuild.js`. Because lancedb's native binary is shipped via `optionalDependencies`, npm only installs the host arch — so the resulting `.vsix` is host-arch-only. Repackage on each target platform.
-- **Milvus / faiss SDKs** (`@zilliz/milvus2-sdk-node`, `faiss-node`). `claude-context-core` still eagerly `require`s them at module load even though we never instantiate either backend. `esbuild.js` aliases both to `src/mcp/milvusStub.js` — a Proxy that throws on any property access — so the bundle resolves without them.
-
-The `.vscodeignore` allowlists exactly the runtime modules we need (tree-sitter packages, `@lancedb/lancedb` + its platform binary, `apache-arrow`, `tslib`, `flatbuffers`, `reflect-metadata`) and prunes docs / tests / source maps. Resulting `dist/extension.js` is ~3.2 MB; the packaged `.vsix` is ~59 MB (the lancedb native binary alone is ~91 MB before vsix compression).
+**Bundle / native dependencies.** `sql.js` is pure-JS but ships a `.wasm` asset esbuild can't inline, so it's marked external in `esbuild.js` and `.vscodeignore` allowlists its `dist/sql-wasm.{js,wasm}` files. Everything else inlines via esbuild.
 
 ## Known limitations
 
@@ -128,6 +105,4 @@ The `.vscodeignore` allowlists exactly the runtime modules we need (tree-sitter 
 - **Non-`file://` editors are ignored** by the reference command (untitled, remote, notebooks).
 - **Status relies on hooks registered in `.claude/settings.local.json`** — if the file isn't writable (permissions, read-only mount), the sidebar falls back to showing every session as inactive.
 - **Multiple VS Code windows on the same workspace overwrite each other's hook port.** Last writer wins; the other window's server still runs but stops receiving events. Reload the losing window to re-register. The MCP server has the same property — both windows write to the same `projects.<workspaceRoot>.mcpServers.takeshicc` slot, so the most recently activated window owns the entry. Different workspaces don't collide.
-- **`claude-context` tools require an embedding API key.** Set `takeshicc.embedding.apiKey` (and optionally `baseURL` / `model`) before calling `index_codebase` / `search_code`. Without a workspace folder open, indexing falls back to `NullVectorDatabase` and the tools return a clear "not configured" error rather than crashing.
-- **The packaged `.vsix` is host-arch-only.** `@lancedb/lancedb`'s native binary is installed via `optionalDependencies`, so `npm install` only fetches the package matching the host platform. Repackage on each target OS/arch (macOS arm64 / x64, Linux x64-gnu / arm64-gnu / *-musl, Windows x64 / arm64) before distributing.
 - **Session titles are truncated to 40 characters.** VS Code's TreeView has no grid layout — long labels push descriptions off-screen, so titles are hard-truncated to guarantee the age/timestamp stays visible. Full title is in the hover tooltip.

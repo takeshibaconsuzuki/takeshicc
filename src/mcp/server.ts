@@ -3,8 +3,6 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { ContextFactory } from './context';
-import { registerContextTools } from './contextTools';
 
 export const MCP_TOKEN_HEADER = 'x-takeshicc-mcp-token';
 export const MCP_PATH = '/mcp';
@@ -24,37 +22,17 @@ export interface McpServerConfig {
  * A per-activation random token gates incoming requests so other processes on the
  * box can't reach the endpoint. Claude Code is configured with the token via
  * ~/.claude.json (see ./settings.ts).
+ *
+ * The server currently registers no tools — kept as scaffolding for future
+ * additions.
  */
 export class McpHttpServer implements vscode.Disposable {
   private readonly httpServer: http.Server;
   private readonly _token = crypto.randomBytes(32).toString('hex');
   private readonly portPromise: Promise<number>;
-  private readonly contextFactory: ContextFactory;
-  private readonly ownsContextFactory: boolean;
-  private readonly workspaceRoot: string | undefined;
   private disposed = false;
 
-  private readonly log: vscode.OutputChannel;
-
-  /**
-   * If a `contextFactory` is supplied, the caller owns its lifecycle (we
-   * won't dispose it in `dispose()`). Useful for sharing one factory
-   * between this server and other components like AutoSync.
-   */
-  constructor(
-    workspaceRoot: string | undefined,
-    contextFactory: ContextFactory | undefined,
-    log: vscode.OutputChannel
-  ) {
-    this.workspaceRoot = workspaceRoot;
-    this.log = log;
-    if (contextFactory) {
-      this.contextFactory = contextFactory;
-      this.ownsContextFactory = false;
-    } else {
-      this.contextFactory = new ContextFactory();
-      this.ownsContextFactory = true;
-    }
+  constructor(_log: vscode.OutputChannel) {
     this.httpServer = http.createServer((req, res) => {
       void this.handle(req, res);
     });
@@ -98,7 +76,7 @@ export class McpHttpServer implements vscode.Disposable {
       return;
     }
 
-    const server = buildMcpServer(this.contextFactory, this.workspaceRoot, this.log);
+    const server = buildMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -129,25 +107,16 @@ export class McpHttpServer implements vscode.Disposable {
   dispose(): void {
     this.disposed = true;
     this.httpServer.close();
-    if (this.ownsContextFactory) this.contextFactory.dispose();
   }
 }
 
 /**
- * Construct a fresh McpServer with the takeshicc tool surface. Called per request
- * because stateless transports must not be reused.
+ * Construct a fresh McpServer. Called per request because stateless
+ * transports must not be reused. No tools are registered yet.
  */
-function buildMcpServer(
-  contextFactory: ContextFactory,
-  workspaceRoot: string | undefined,
-  log: vscode.OutputChannel
-): McpServer {
-  const server = new McpServer({
+function buildMcpServer(): McpServer {
+  return new McpServer({
     name: 'takeshicc',
     version: '0.0.1',
   });
-
-  registerContextTools(server, contextFactory, workspaceRoot, log);
-
-  return server;
 }

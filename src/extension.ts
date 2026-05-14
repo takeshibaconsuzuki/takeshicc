@@ -11,8 +11,6 @@ import { HookStateMachine } from './hooks/stateMachine';
 import { installHooks, uninstallHooks } from './hooks/settings';
 import { McpHttpServer } from './mcp/server';
 import { registerMcpServer, unregisterMcpServer } from './mcp/settings';
-import { ContextFactory } from './mcp/context';
-import { AutoSync } from './mcp/autoSync';
 
 const AUTO_REFRESH_MS = 30_000;
 const NEW_CHAT_POLL_MS = 1_000;
@@ -34,13 +32,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const tracker = new TerminalTracker();
   const hookStates = new HookStateMachine();
   const hookServer = new HookServer();
-  // Shared between the MCP server and the AutoSync watcher so they don't
-  // race against each other on the same LanceDB tables.
-  const contextFactory = new ContextFactory();
-  const mcpServer = new McpHttpServer(workspaceRoot, contextFactory, log);
-  const autoSync = workspaceRoot
-    ? new AutoSync(workspaceRoot, contextFactory, log)
-    : undefined;
+  const mcpServer = new McpHttpServer(log);
   const provider = new SessionTreeDataProvider(service, tracker, hookStates);
 
   context.subscriptions.push(
@@ -77,8 +69,6 @@ export function activate(context: vscode.ExtensionContext): void {
     hookStates,
     hookServer,
     mcpServer,
-    contextFactory,
-    ...(autoSync ? [autoSync] : []),
     provider,
     vscode.commands.registerCommand(
       'takeshicc.insertReference',
