@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type * as vscode from 'vscode';
@@ -167,10 +168,72 @@ export class WorktreeService {
         { cwd: this.workspaceRoot }
       );
     } catch (err) {
-      const e = err as NodeJS.ErrnoException & { stderr?: string };
-      const detail = (e.stderr || e.message || '').trim();
-      throw new Error(detail || 'git worktree add failed');
+      throw new Error(detailFromError(err) || 'git worktree add failed');
     }
+    this.cacheAt = 0;
+    this.changeEmitter.fire();
+  }
+
+  /**
+   * Remove a worktree directory and (if `branch` is provided) delete its
+   * local branch. `force=true` adds `--force` to `worktree remove` so
+   * uncommitted changes / untracked files are discarded. The branch delete
+   * always uses `-D` — we assume a squash-merge workflow where feature
+   * branches are never "fully merged" by git's reachability check.
+   *
+   * If the worktree directory is already gone (manual delete, prior partial
+   * removal), the missing path is treated as success and we run
+   * `git worktree prune` to clean stale metadata before deleting the branch.
+   */
+  async remove(params: {
+    path: string;
+    branch: string | null;
+    force: boolean;
+  }): Promise<void> {
+    if (!this.workspaceRoot) throw new Error('No workspace open');
+    const { path: wtPath, branch, force } = params;
+    if (!wtPath.trim()) throw new Error('Worktree path is required');
+
+    this.log?.appendLine(
+      `worktrees: remove path=${wtPath} branch=${branch ?? '-'} force=${force}`
+    );
+
+    const exists = await pathExists(wtPath);
+    if (exists) {
+      const args = ['worktree', 'remove'];
+      if (force) args.push('--force');
+      args.push(wtPath);
+      try {
+        await execFileP('git', args, { cwd: this.workspaceRoot });
+      } catch (err) {
+        throw new Error(detailFromError(err) || 'git worktree remove failed');
+      }
+    } else {
+      // Stale metadata may still reference the path — clean it before the
+      // branch delete so git doesn't complain that the branch is checked out
+      // in a worktree.
+      await execFileP('git', ['worktree', 'prune'], {
+        cwd: this.workspaceRoot,
+      }).catch(() => undefined);
+    }
+
+    if (branch) {
+      // Always -D: squash-merge workflows leave the feature branch's commits
+      // unreachable from main, so `git branch -d` would refuse even after the
+      // PR has landed. The worktree directory is gone by this point anyway.
+      try {
+        await execFileP('git', ['branch', '-D', branch], {
+          cwd: this.workspaceRoot,
+        });
+      } catch (err) {
+        const detail = detailFromError(err);
+        throw new Error(
+          'Worktree removed; branch delete failed' +
+            (detail ? ': ' + detail : '')
+        );
+      }
+    }
+
     this.cacheAt = 0;
     this.changeEmitter.fire();
   }
@@ -180,6 +243,20 @@ export class WorktreeService {
     this.cacheAt = 0;
     this.changeEmitter.fire();
   }
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detailFromError(err: unknown): string {
+  const e = err as NodeJS.ErrnoException & { stderr?: string };
+  return (e.stderr || e.message || '').trim();
 }
 
 function normalize(p: string): string {
