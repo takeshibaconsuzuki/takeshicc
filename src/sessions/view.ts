@@ -62,6 +62,10 @@ interface ViewState {
    * worktree is deleted.
    */
   bootstrapFailed: string[];
+  /** Paths whose delete is currently in flight (renders a spinner). */
+  deleting: string[];
+  /** Paths whose next delete should be force-mode (red icon). */
+  forcePending: string[];
 }
 
 /**
@@ -104,6 +108,21 @@ export class SessionsWebviewViewProvider
    * reloads. Delete remains available so the user can clean up.
    */
   private readonly bootstrapFailed = new Set<string>();
+  /**
+   * Paths whose `git worktree remove` is currently running. The row's
+   * ❌ is replaced with a spinner and the row itself is non-clickable
+   * while the entry is present, so a second click can't enqueue a
+   * duplicate delete that would race the first.
+   */
+  private readonly deleting = new Set<string>();
+  /**
+   * Paths whose previous non-force delete failed. The next click on the
+   * row's delete button retries with `--force`. Lives on the provider so
+   * the red "force-pending" hint survives modal close/reopen — the
+   * webview's local Set would be reset by `openModal`. Pruned in
+   * pushState when the worktree no longer exists.
+   */
+  private readonly forcePending = new Set<string>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -351,28 +370,59 @@ export class SessionsWebviewViewProvider
     force: boolean
   ): Promise<void> {
     const view = this.view;
+    // Skip items whose delete is already in flight — defensive against the
+    // (now-prevented) webview double-click.
+    const todo = items.filter((it) => !this.deleting.has(it.path));
+    if (todo.length === 0) return;
+    for (const it of todo) this.deleting.add(it.path);
+    await this.pushState(false);
+
     const succeeded: string[] = [];
-    const failures: { path: string; error: string }[] = [];
-    for (const it of items) {
+    const failures: { path: string; branch: string | null; error: string }[] = [];
+    for (const it of todo) {
       try {
         await this.worktrees.remove({ path: it.path, branch: it.branch, force });
         succeeded.push(it.path);
         this.bootstrapFailed.delete(it.path);
+        this.forcePending.delete(it.path);
         this.log.appendLine(`sessions: deleteWorktree OK path=${it.path}`);
       } catch (err) {
         const message = (err as Error).message;
         this.log.appendLine(`sessions: deleteWorktree FAILED path=${it.path} — ${message}`);
-        failures.push({ path: it.path, error: message });
+        failures.push({ path: it.path, branch: it.branch, error: message });
+        this.forcePending.add(it.path);
       }
+      this.deleting.delete(it.path);
+      // Push per-item so the spinner clears as each delete finishes, not
+      // only after the whole batch.
+      await this.pushState(false);
     }
+
     if (succeeded.length && succeeded.includes(this.state.getSelectedWorktree())) {
       this.state.setSelectedWorktree('');
     }
+    // Keep posting the inline result so the modal's wt-delete-error area
+    // still shows the failure list when the user is looking at it.
     view?.webview.postMessage({
       type: 'deleteWorktreesResult',
       succeeded,
-      failures,
+      failures: failures.map((f) => ({ path: f.path, error: f.error })),
     });
+    // Notification per failure so the user sees it even with the modal closed.
+    for (const f of failures) {
+      const label = f.branch || f.path;
+      const hint = this.forcePending.has(f.path)
+        ? ' (next delete click will force-remove)'
+        : '';
+      void vscode.window
+        .showErrorMessage(
+          `Failed to delete worktree ${label}: ${f.error}${hint}`,
+          'Show output'
+        )
+        .then((action) => {
+          if (action === 'Show output') this.log.show(true);
+        });
+    }
     if (succeeded.length) await this.pushState(true);
   }
 
@@ -451,6 +501,13 @@ export class SessionsWebviewViewProvider
     const worktreeOpts: WorktreeOption[] = (repo?.worktrees ?? []).map((w) =>
       toOption(w, repo?.repoRoot)
     );
+    // Drop force-pending markers whose worktree was removed out-of-band
+    // (manual `git worktree remove`, branch deletion, etc.) so the set
+    // doesn't grow unbounded across the session.
+    const validPaths = new Set(worktreeOpts.map((w) => w.path));
+    for (const p of Array.from(this.forcePending)) {
+      if (!validPaths.has(p)) this.forcePending.delete(p);
+    }
     const selected = this.state.getSelectedWorktree();
     const state: ViewState = {
       rows,
@@ -466,6 +523,8 @@ export class SessionsWebviewViewProvider
       hasRepo: !!repo,
       bootstrapping: Array.from(this.bootstraps.values()),
       bootstrapFailed: Array.from(this.bootstrapFailed),
+      deleting: Array.from(this.deleting),
+      forcePending: Array.from(this.forcePending),
     };
     // Reconcile: if the previously-selected worktree disappeared, fall back
     // to the new selection so subsequent commands see a valid path.
@@ -907,9 +966,6 @@ function renderHtml(webview: vscode.Webview): string {
   const LIST_CAP = 10;
   /** When true, render all matches; otherwise cap at LIST_CAP. */
   let expanded = false;
-  /** Paths whose previous non-force delete failed; the next click on that row's
-   *  icon retries with force=true. Cleared on success. */
-  const forcePending = new Set();
 
   let lastState = {
     branches: [],
@@ -920,6 +976,8 @@ function renderHtml(webview: vscode.Webview): string {
     selectedWorktree: null,
     bootstrapping: [],
     bootstrapFailed: [],
+    deleting: [],
+    forcePending: [],
   };
   let userEditedDir = false;
 
@@ -1032,6 +1090,8 @@ function renderHtml(webview: vscode.Webview): string {
       selectedWorktree: state.selectedWorktree,
       bootstrapping: state.bootstrapping || [],
       bootstrapFailed: state.bootstrapFailed || [],
+      deleting: state.deleting || [],
+      forcePending: state.forcePending || [],
     };
     renderHeader(state);
     renderRows(state);
@@ -1059,6 +1119,8 @@ function renderHtml(webview: vscode.Webview): string {
       (lastState.bootstrapping || []).map((b) => b.dir)
     );
     const failedPaths = new Set(lastState.bootstrapFailed || []);
+    const deletingPaths = new Set(lastState.deleting || []);
+    const forcePendingPaths = new Set(lastState.forcePending || []);
 
     for (const w of visible) {
       const row = document.createElement('div');
@@ -1066,8 +1128,11 @@ function renderHtml(webview: vscode.Webview): string {
       row.setAttribute('role', 'listitem');
       if (w.path === lastState.selectedWorktree) row.classList.add('selected');
       const isBootstrapping = bootstrappingPaths.has(w.path);
-      const isFailed = !isBootstrapping && failedPaths.has(w.path);
+      const isDeleting = deletingPaths.has(w.path);
+      const isFailed =
+        !isBootstrapping && !isDeleting && failedPaths.has(w.path);
       if (isBootstrapping) row.classList.add('bootstrapping');
+      if (isDeleting) row.classList.add('bootstrapping'); // reuse cursor:progress + no-hover style
       if (isFailed) {
         row.classList.add('bootstrap-failed');
         row.title = 'Bootstrap failed for this worktree — delete it and recreate, or check the Takeshi CC output channel.';
@@ -1081,15 +1146,18 @@ function renderHtml(webview: vscode.Webview): string {
       label.appendChild(labelText);
       row.appendChild(label);
 
-      if (isBootstrapping) {
-        // While the bootstrap command runs we hide delete (deleting a half-
-        // initialized worktree would race the child process and leave stale
-        // git metadata) and make the row non-clickable so selecting it can't
-        // race with the bootstrap finishing.
+      if (isBootstrapping || isDeleting) {
+        // Spinner replaces either the delete button (during delete) or the
+        // delete button entirely (during bootstrap — deleting a half-init
+        // worktree would race the child process). Row also non-clickable
+        // so selecting can't race with the in-flight op.
         const spin = document.createElement('div');
         spin.className = 'wt-row-spin';
         spin.setAttribute('role', 'progressbar');
-        spin.setAttribute('aria-label', 'Bootstrap running');
+        spin.setAttribute(
+          'aria-label',
+          isDeleting ? 'Deleting worktree' : 'Bootstrap running'
+        );
         row.appendChild(spin);
       } else if (w.isMain) {
         // Main worktree can't be deleted (git refuses) — empty cell preserves alignment.
@@ -1099,7 +1167,7 @@ function renderHtml(webview: vscode.Webview): string {
         del.type = 'button';
         del.className = 'wt-row-delete';
         del.textContent = '❌';
-        const isForce = forcePending.has(w.path);
+        const isForce = forcePendingPaths.has(w.path);
         if (isForce) del.classList.add('force');
         del.title = isForce
           ? 'Previous delete failed. Click to force delete (discards uncommitted changes).'
@@ -1112,7 +1180,7 @@ function renderHtml(webview: vscode.Webview): string {
         row.appendChild(del);
       }
 
-      if (!isBootstrapping && !isFailed) {
+      if (!isBootstrapping && !isDeleting && !isFailed) {
         row.addEventListener('click', () => {
           vscode.postMessage({ type: 'selectWorktree', path: w.path });
           closeModal();
@@ -1132,7 +1200,7 @@ function renderHtml(webview: vscode.Webview): string {
 
   function triggerDelete(w) {
     if (w.isMain) return;
-    const force = forcePending.has(w.path);
+    const force = (lastState.forcePending || []).indexOf(w.path) !== -1;
     wtDeleteError.textContent = '';
     vscode.postMessage({
       type: 'deleteWorktrees',
@@ -1144,7 +1212,6 @@ function renderHtml(webview: vscode.Webview): string {
   function openModal() {
     if (!lastState.hasRepo) return;
     expanded = false;
-    forcePending.clear();
     wtSearch.value = '';
     wtDeleteError.textContent = '';
 
@@ -1218,9 +1285,6 @@ function renderHtml(webview: vscode.Webview): string {
     if (data.type === 'state') {
       render(data.state);
       if (modal.classList.contains('open')) {
-        // Drop force-pending entries for worktrees that disappeared.
-        const valid = new Set((lastState.worktrees || []).map((w) => w.path));
-        for (const p of Array.from(forcePending)) if (!valid.has(p)) forcePending.delete(p);
         renderWorktreeList();
       }
     }
@@ -1237,17 +1301,13 @@ function renderHtml(webview: vscode.Webview): string {
       }
     }
     else if (data.type === 'deleteWorktreesResult') {
-      for (const p of data.succeeded || []) forcePending.delete(p);
+      // forcePending lives on the provider now — it's already reflected
+      // via the state push. This message only carries the most recent
+      // error text for the inline area below the worktree list.
       const failures = data.failures || [];
-      if (failures.length > 0) {
-        for (const f of failures) forcePending.add(f.path);
-        wtDeleteError.textContent = failures
-          .map((f) => f.error)
-          .join('\\n');
-      } else {
-        wtDeleteError.textContent = '';
-      }
-      renderWorktreeList();
+      wtDeleteError.textContent = failures.length
+        ? failures.map((f) => f.error).join('\\n')
+        : '';
     }
   });
 </script>
