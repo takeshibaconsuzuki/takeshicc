@@ -6,6 +6,7 @@ import { mapHookStatus, type SessionStatus } from './statusResolver';
 import { formatRelativeTime } from './time';
 import { TailCache } from './tail';
 import type { WorktreeService, Worktree } from '../worktrees/service';
+import { installHooks } from '../hooks/settings';
 
 const SLOW_TICK_MS = 30_000;
 // Claude fires Stop/idle_prompt before the JSONL is fully flushed; an
@@ -116,6 +117,7 @@ export class SessionsWebviewViewProvider
       getSelectedWorktree(): string;
       setSelectedWorktree(p: string): void;
     },
+    private readonly getHookConfig: () => Promise<{ port: number; token: string }>,
     private readonly log: vscode.OutputChannel
   ) {
     this.tailCache = new TailCache(workspaceRoot, log);
@@ -265,6 +267,28 @@ export class SessionsWebviewViewProvider
     // the new worktree — the user opts into selection by clicking the row
     // (which is itself blocked for this path until its bootstrap completes).
     view?.webview.postMessage({ type: 'createWorktreeResult', ok: true, path: dir });
+
+    // Install our Claude Code hook entries into the new worktree's
+    // .claude/settings.local.json so per-session status icons in the sidebar
+    // light up for sessions launched there. Best-effort — if it fails, the
+    // worktree still exists and the bootstrap still runs; the user just
+    // loses status indication for sessions started in this worktree.
+    try {
+      const { port, token } = await this.getHookConfig();
+      const file = await installHooks({ workspaceRoot: dir, port, token });
+      this.log.appendLine(`sessions: hooks installed in worktree settings=${file}`);
+    } catch (err) {
+      const message = (err as Error).message;
+      this.log.appendLine(`sessions: hook install in worktree FAILED — ${message}`);
+      void vscode.window
+        .showErrorMessage(
+          `Failed to install Claude Code hooks in worktree ${created.branch}: ${message}. Per-session status icons will be unavailable for sessions started in this worktree.`,
+          'Show output'
+        )
+        .then((action) => {
+          if (action === 'Show output') this.log.show(true);
+        });
+    }
 
     // A successful create at this path supersedes any prior failed-bootstrap
     // marker (e.g. user deleted the dir manually and recreated). With no

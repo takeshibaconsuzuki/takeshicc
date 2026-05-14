@@ -56,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
     'takeshicc.openSession',
     worktrees,
     selectionState,
+    () => hookServer.getConfig(),
     log
   );
 
