@@ -50,6 +50,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   hooksReady = bootstrapHooks(hookServer, workspaceRoot, log);
   void bootstrapMcp(mcpServer, workspaceRoot, log);
+  void ensurePanelLeft(log);
 
   context.subscriptions.push(
     log,
@@ -75,6 +76,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('takeshicc.newChat', () =>
       newChatCommand(service, provider, tracker, hookStates, log, workspaceRoot)
+    ),
+    vscode.commands.registerCommand('takeshicc.applyLayout', () =>
+      applyLayoutCommand(log)
     ),
 
     // Observe claude invocations in ANY terminal. When the user types `claude`
@@ -142,6 +146,82 @@ export async function deactivate(): Promise<void> {
     } catch {
       // Best-effort — we're shutting down.
     }
+  }
+}
+
+// `decreaseViewSize` shrinks by a percentage of current size, not a fixed
+// pixel delta — so we approach minimum asymptotically. 100 lands within
+// ~1px of min on any reasonable display.
+const SHRINK_TO_MIN_STEPS = 100;
+
+async function applyLayoutCommand(log: vscode.OutputChannel): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('takeshicc.layout');
+  const sidebarNudges = Math.max(0, cfg.get<number>('sidebarNudges', 10));
+  const panelNudges = Math.max(0, cfg.get<number>('panelNudges', 10));
+
+  // Phase 1: shrink both to minimum (editor area absorbs the released space).
+  await focusSidebar(log);
+  await runResize('decrease', SHRINK_TO_MIN_STEPS);
+
+  await focusPanel(log);
+  await runResize('decrease', SHRINK_TO_MIN_STEPS);
+
+  // Phase 2: grow each by the configured nudge count.
+  await focusSidebar(log);
+  await runResize('increase', sidebarNudges);
+
+  await focusPanel(log);
+  await runResize('increase', panelNudges);
+
+  await tryCommand('workbench.action.focusActiveEditorGroup', log);
+}
+
+async function focusSidebar(log: vscode.OutputChannel): Promise<void> {
+  await tryCommand('workbench.action.focusSideBar', log);
+}
+
+async function focusPanel(log: vscode.OutputChannel): Promise<void> {
+  await tryCommand('workbench.action.terminal.focus', log);
+  await tryCommand('workbench.action.focusPanel', log);
+}
+
+async function tryCommand(id: string, log: vscode.OutputChannel): Promise<void> {
+  try {
+    await vscode.commands.executeCommand(id);
+  } catch (err) {
+    log.appendLine(`applyLayout: ${id} FAILED — ${(err as Error).message}`);
+  }
+}
+
+async function runResize(
+  direction: 'increase' | 'decrease',
+  steps: number
+): Promise<void> {
+  const cmd =
+    direction === 'increase'
+      ? 'workbench.action.increaseViewSize'
+      : 'workbench.action.decreaseViewSize';
+  for (let i = 0; i < steps; i++) {
+    await vscode.commands.executeCommand(cmd);
+  }
+}
+
+async function ensurePanelLeft(log: vscode.OutputChannel): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration();
+  const key = 'workbench.panel.defaultLocation';
+  const current = cfg.get<string>(key);
+  if (current !== 'left') {
+    try {
+      await cfg.update(key, 'left', vscode.ConfigurationTarget.Global);
+      log.appendLine(`ensurePanelLeft: set ${key}=left (was ${current ?? '<unset>'})`);
+    } catch (err) {
+      log.appendLine(`ensurePanelLeft: setting update FAILED — ${(err as Error).message}`);
+    }
+  }
+  try {
+    await vscode.commands.executeCommand('workbench.action.positionPanelLeft');
+  } catch (err) {
+    log.appendLine(`ensurePanelLeft: positionPanelLeft FAILED — ${(err as Error).message}`);
   }
 }
 

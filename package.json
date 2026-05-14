@@ -34,6 +34,10 @@
         "command": "takeshicc.newChat",
         "title": "Takeshi CC: New Chat",
         "icon": "$(add)"
+      },
+      {
+        "command": "takeshicc.applyLayout",
+        "title": "Takeshi CC: Apply Layout"
       }
     ],
     "keybindings": [
@@ -44,34 +48,16 @@
         "when": "editorTextFocus"
       },
       {
-        "command": "runCommands",
+        "command": "workbench.action.terminal.toggleTerminal",
         "key": "ctrl+`",
         "mac": "ctrl+`",
-        "args": {
-          "commands": [
-            "workbench.action.terminal.toggleTerminal",
-            "workbench.action.toggleMaximizedPanel"
-          ]
-        },
         "when": "!panelVisible"
-      },
-      {
-        "command": "runCommands",
-        "key": "ctrl+`",
-        "mac": "ctrl+`",
-        "args": {
-          "commands": [
-            "workbench.action.toggleMaximizedPanel",
-            "workbench.action.closePanel"
-          ]
-        },
-        "when": "panelVisible && panelMaximized"
       },
       {
         "command": "workbench.action.toggleMaximizedPanel",
         "key": "ctrl+`",
         "mac": "ctrl+`",
-        "when": "panelVisible && !panelMaximized"
+        "when": "panelVisible"
       },
       {
         "command": "workbench.action.terminal.sendSequence",
@@ -146,6 +132,18 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically re-index changed files in the workspace (~10s after a save). Only updates an existing index — won't auto-create one. Disable to control embedding-API spend manually."
+        },
+        "takeshicc.layout.sidebarNudges": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 0,
+          "markdownDescription": "Number of `increaseViewWidth` nudges applied to the primary sidebar when running `Takeshi CC: Apply Layout`. Each nudge is ~50–60px depending on VS Code version and display."
+        },
+        "takeshicc.layout.panelNudges": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 0,
+          "markdownDescription": "Number of `increaseViewWidth` nudges applied to the panel (terminals) when running `Takeshi CC: Apply Layout`. Each nudge is ~50–60px depending on VS Code version and display."
         }
       }
     }
