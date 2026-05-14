@@ -31,6 +31,11 @@ interface WorktreeOption {
   isMain: boolean;
 }
 
+interface BootstrapState {
+  branch: string;
+  dir: string;
+}
+
 interface ViewState {
   rows: RowState[];
   tailLines: number;
@@ -41,6 +46,21 @@ interface ViewState {
   defaultBase: string | null;
   parentDir: string | null;
   hasRepo: boolean;
+  /**
+   * Worktrees whose bootstrap command is still running. Each entry drives a
+   * spinner in the worktree list (replacing the delete button) and disables
+   * row selection for that path. Bootstraps run in parallel — the create
+   * form is not gated on any of them.
+   */
+  bootstrapping: BootstrapState[];
+  /**
+   * Paths whose bootstrap exited non-zero. Row selection stays disabled
+   * (the worktree may be half-initialized); delete is still available so
+   * the user can clean up. In-memory only — cleared on window reload, on
+   * a subsequent successful bootstrap at the same path, or when the
+   * worktree is deleted.
+   */
+  bootstrapFailed: string[];
 }
 
 /**
@@ -69,6 +89,20 @@ export class SessionsWebviewViewProvider
   private delayedSlowTimer: NodeJS.Timeout | undefined;
   private pushQueued = false;
   private slowQueued = false;
+  /**
+   * Active bootstrap commands keyed by worktree path. Each entry surfaces a
+   * spinner on its worktree row (replacing the delete button) and blocks
+   * row selection for that path until the child process exits. Multiple
+   * bootstraps run in parallel; the create form is never gated on them.
+   */
+  private readonly bootstraps = new Map<string, BootstrapState>();
+  /**
+   * Paths whose bootstrap most recently exited non-zero. Row selection
+   * stays blocked until either the entry is cleared (successful re-run
+   * isn't tracked, but the worktree being deleted is) or the window
+   * reloads. Delete remains available so the user can clean up.
+   */
+  private readonly bootstrapFailed = new Set<string>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -209,12 +243,14 @@ export class SessionsWebviewViewProvider
     dir: string
   ): Promise<void> {
     const view = this.view;
+    const bootstrapCommand = vscode.workspace
+      .getConfiguration('takeshicc.worktrees')
+      .get<string>('bootstrapCommand', '')
+      .trim();
+    let created: { branch: string };
     try {
-      await this.worktrees.create({ name, baseBranch, dir });
-      this.log.appendLine(`sessions: createWorktree OK name=${name}`);
-      view?.webview.postMessage({ type: 'createWorktreeResult', ok: true, path: dir });
-      this.state.setSelectedWorktree(dir);
-      await this.pushState(true);
+      created = await this.worktrees.create({ name, baseBranch, dir });
+      this.log.appendLine(`sessions: createWorktree OK name=${created.branch}`);
     } catch (err) {
       const message = (err as Error).message;
       this.log.appendLine(`sessions: createWorktree FAILED — ${message}`);
@@ -223,6 +259,66 @@ export class SessionsWebviewViewProvider
         ok: false,
         error: message,
       });
+      return;
+    }
+    // git worktree add succeeded. Keep the modal open and don't auto-select
+    // the new worktree — the user opts into selection by clicking the row
+    // (which is itself blocked for this path until its bootstrap completes).
+    view?.webview.postMessage({ type: 'createWorktreeResult', ok: true, path: dir });
+
+    // A successful create at this path supersedes any prior failed-bootstrap
+    // marker (e.g. user deleted the dir manually and recreated). With no
+    // bootstrap configured the path is presumed-good; otherwise the marker
+    // is rewritten by runBootstrapAsync on completion.
+    this.bootstrapFailed.delete(dir);
+    if (!bootstrapCommand) {
+      await this.pushState(true);
+      return;
+    }
+    this.bootstraps.set(dir, { branch: created.branch, dir });
+    await this.pushState(true);
+    void this.runBootstrapAsync(bootstrapCommand, created.branch, baseBranch, dir);
+  }
+
+  private async runBootstrapAsync(
+    command: string,
+    newBranch: string,
+    baseBranch: string,
+    dir: string
+  ): Promise<void> {
+    this.log.appendLine(`sessions: bootstrap starting branch=${newBranch}`);
+    let failure: string | null = null;
+    try {
+      await this.worktrees.runBootstrap({
+        command,
+        dir,
+        newBranch,
+        baseBranch,
+      });
+      this.log.appendLine(`sessions: bootstrap OK branch=${newBranch}`);
+    } catch (err) {
+      failure = (err as Error).message || 'unknown error';
+      this.log.appendLine(`sessions: bootstrap FAILED branch=${newBranch} — ${failure}`);
+    }
+    // Remove the spinner / update click-gating *before* awaiting any
+    // notification — showErrorMessage blocks until the user interacts with
+    // it, and the row must reflect the bootstrap's exit immediately.
+    // On failure we mark the path so row selection stays blocked; on
+    // success we clear any prior marker (in case this was a retry).
+    this.bootstraps.delete(dir);
+    if (failure) this.bootstrapFailed.add(dir);
+    else this.bootstrapFailed.delete(dir);
+    await this.pushState(false);
+    if (failure) {
+      const action = await vscode.window.showErrorMessage(
+        `Worktree bootstrap failed for ${newBranch}: ${failure}`,
+        'Show output'
+      );
+      if (action === 'Show output') this.log.show(true);
+    } else {
+      void vscode.window.showInformationMessage(
+        `Worktree bootstrap completed for ${newBranch}`
+      );
     }
   }
 
@@ -237,6 +333,7 @@ export class SessionsWebviewViewProvider
       try {
         await this.worktrees.remove({ path: it.path, branch: it.branch, force });
         succeeded.push(it.path);
+        this.bootstrapFailed.delete(it.path);
         this.log.appendLine(`sessions: deleteWorktree OK path=${it.path}`);
       } catch (err) {
         const message = (err as Error).message;
@@ -343,6 +440,8 @@ export class SessionsWebviewViewProvider
       defaultBase: repo?.currentBranch ?? null,
       parentDir: repo ? parentOf(repo.repoRoot) : null,
       hasRepo: !!repo,
+      bootstrapping: Array.from(this.bootstraps.values()),
+      bootstrapFailed: Array.from(this.bootstrapFailed),
     };
     // Reconcile: if the previously-selected worktree disappeared, fall back
     // to the new selection so subsequent commands see a valid path.
@@ -636,6 +735,24 @@ function renderHtml(webview: vscode.Webview): string {
     border-color: var(--vscode-errorForeground);
     opacity: 1;
   }
+  .wt-row.bootstrapping { cursor: progress; }
+  .wt-row.bootstrapping:hover { background: transparent; }
+  .wt-row.bootstrap-failed { cursor: not-allowed; }
+  .wt-row.bootstrap-failed:hover { background: transparent; }
+  .wt-row.bootstrap-failed .wt-row-label-text {
+    color: var(--vscode-errorForeground);
+    text-decoration: line-through;
+  }
+  .wt-row-spin {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--vscode-charts-orange, #d18616);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    margin: 0 6px;
+    box-sizing: border-box;
+  }
   .modal .wt-expand {
     width: 100%;
     margin-top: 6px;
@@ -777,6 +894,8 @@ function renderHtml(webview: vscode.Webview): string {
     hasRepo: false,
     worktrees: [],
     selectedWorktree: null,
+    bootstrapping: [],
+    bootstrapFailed: [],
   };
   let userEditedDir = false;
 
@@ -887,6 +1006,8 @@ function renderHtml(webview: vscode.Webview): string {
       hasRepo: state.hasRepo,
       worktrees: state.worktrees,
       selectedWorktree: state.selectedWorktree,
+      bootstrapping: state.bootstrapping || [],
+      bootstrapFailed: state.bootstrapFailed || [],
     };
     renderHeader(state);
     renderRows(state);
@@ -910,11 +1031,23 @@ function renderHtml(webview: vscode.Webview): string {
     const hiddenCount = expanded ? 0 : Math.max(0, filtered.length - LIST_CAP);
     const visible = expanded ? filtered : filtered.slice(0, LIST_CAP);
 
+    const bootstrappingPaths = new Set(
+      (lastState.bootstrapping || []).map((b) => b.dir)
+    );
+    const failedPaths = new Set(lastState.bootstrapFailed || []);
+
     for (const w of visible) {
       const row = document.createElement('div');
       row.className = 'wt-row';
       row.setAttribute('role', 'listitem');
       if (w.path === lastState.selectedWorktree) row.classList.add('selected');
+      const isBootstrapping = bootstrappingPaths.has(w.path);
+      const isFailed = !isBootstrapping && failedPaths.has(w.path);
+      if (isBootstrapping) row.classList.add('bootstrapping');
+      if (isFailed) {
+        row.classList.add('bootstrap-failed');
+        row.title = 'Bootstrap failed for this worktree — delete it and recreate, or check the Takeshi CC output channel.';
+      }
 
       const label = document.createElement('div');
       label.className = 'wt-row-label';
@@ -924,7 +1057,17 @@ function renderHtml(webview: vscode.Webview): string {
       label.appendChild(labelText);
       row.appendChild(label);
 
-      if (w.isMain) {
+      if (isBootstrapping) {
+        // While the bootstrap command runs we hide delete (deleting a half-
+        // initialized worktree would race the child process and leave stale
+        // git metadata) and make the row non-clickable so selecting it can't
+        // race with the bootstrap finishing.
+        const spin = document.createElement('div');
+        spin.className = 'wt-row-spin';
+        spin.setAttribute('role', 'progressbar');
+        spin.setAttribute('aria-label', 'Bootstrap running');
+        row.appendChild(spin);
+      } else if (w.isMain) {
         // Main worktree can't be deleted (git refuses) — empty cell preserves alignment.
         row.appendChild(document.createElement('span'));
       } else {
@@ -945,10 +1088,12 @@ function renderHtml(webview: vscode.Webview): string {
         row.appendChild(del);
       }
 
-      row.addEventListener('click', () => {
-        vscode.postMessage({ type: 'selectWorktree', path: w.path });
-        closeModal();
-      });
+      if (!isBootstrapping && !isFailed) {
+        row.addEventListener('click', () => {
+          vscode.postMessage({ type: 'selectWorktree', path: w.path });
+          closeModal();
+        });
+      }
 
       wtListEl.appendChild(row);
     }
@@ -982,7 +1127,6 @@ function renderHtml(webview: vscode.Webview): string {
     userEditedDir = false;
     wtName.value = '';
     wtError.textContent = '';
-    wtCreate.disabled = false;
     wtBase.innerHTML = '';
     for (const b of lastState.branches) {
       const opt = document.createElement('option');
@@ -1057,11 +1201,15 @@ function renderHtml(webview: vscode.Webview): string {
       }
     }
     else if (data.type === 'createWorktreeResult') {
+      // Always re-enable the Create button — bootstraps run in parallel and
+      // never block the form. On success the new row appears (with a spinner)
+      // via the state push that follows; the modal stays open so the user
+      // can queue another create or just watch.
+      wtCreate.disabled = false;
       if (data.ok) {
-        closeModal();
+        wtError.textContent = '';
       } else {
         wtError.textContent = data.error || 'Failed to create worktree';
-        wtCreate.disabled = false;
       }
     }
     else if (data.type === 'deleteWorktreesResult') {

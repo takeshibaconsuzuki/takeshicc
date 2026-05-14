@@ -126,6 +126,11 @@
           "default": 640,
           "minimum": 0,
           "markdownDescription": "Panel width (or height, when on bottom/top) in pixels written to VS Code's global `state.vscdb` (key `workbench.panel.size`) when running `Takeshi CC: Apply Layout Sizes`. Requires a window reload."
+        },
+        "takeshicc.worktrees.bootstrapCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Shell command to run in the new worktree's directory immediately after `git worktree add` succeeds. Leave empty to skip. Available placeholders: `{new_branch}`, `{worktree_path}`, `{base_branch}` (literal `{` is written as `{{`). Runs via the system shell (`cmd.exe` on Windows, `/bin/sh` on Unix) in the background — multiple creates can have bootstraps in flight at once. Each worktree row shows a spinner in place of its delete button until that bootstrap exits; row selection and deletion are blocked for the path during that window. On exit, a VS Code info notification fires for success or an error notification (with a link to the Takeshi CC output channel) for failure. Example: `npm install && cp ../main/.env .env`."
         }
       }
     }

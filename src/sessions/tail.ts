@@ -46,19 +46,8 @@ export class TailCache {
     if (tailLines <= 0) return '';
     const cached = this.cache.get(sessionId);
     if (cached && cached.lines === tailLines) {
-      if (cached.lastModified === lastModified) {
-        this.log?.appendLine(
-          `tail HIT   ${shortId(sessionId)} lastModified=${lastModified} lines=${tailLines} chars=${cached.text.length}`
-        );
-        return cached.text;
-      }
-      if (cacheOnly) {
-        this.log?.appendLine(
-          `tail STALE ${shortId(sessionId)} lastModified=${lastModified} ` +
-            `cachedLastModified=${cached.lastModified} lines=${tailLines} chars=${cached.text.length}`
-        );
-        return cached.text;
-      }
+      if (cached.lastModified === lastModified) return cached.text;
+      if (cacheOnly) return cached.text;
     }
     const prev = cached
       ? `prevLastModified=${cached.lastModified} prevChars=${cached.text.length}`

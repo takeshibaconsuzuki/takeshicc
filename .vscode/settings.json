@@ -1,0 +1,3 @@
+{
+  "takeshicc.worktrees.bootstrapCommand": "set \"PATH=E:\\Devel\\takeshicc\\.node;%PATH%\" && npm i"
+}

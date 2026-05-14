@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -148,13 +148,16 @@ export class WorktreeService {
    * check it out (`baseBranch` is ignored — git won't let two branches share
    * a name); else create a new branch `name` off `baseBranch`.
    *
+   * Returns the resolved branch name (the input `name` trimmed, or `baseBranch`
+   * if `name` was empty) so callers can feed it to {@link runBootstrap}.
+   *
    * Throws on git failure (e.g. dir exists, branch already checked out elsewhere).
    */
   async create(params: {
     name: string;
     baseBranch: string;
     dir: string;
-  }): Promise<void> {
+  }): Promise<{ branch: string }> {
     if (!this.workspaceRoot) {
       throw new Error('No workspace open');
     }
@@ -180,6 +183,31 @@ export class WorktreeService {
     }
     this.cacheAt = 0;
     this.changeEmitter.fire();
+    return { branch: name };
+  }
+
+  /**
+   * Run `command` (post-substitution) in `dir` via the system shell. Intended
+   * for the per-worktree bootstrap step — kept separate from {@link create}
+   * so callers can run it async after the create-worktree modal has closed.
+   * Throws with a short summary including the last few output lines on
+   * non-zero exit; otherwise resolves silently. Output streams to `log`.
+   */
+  async runBootstrap(params: {
+    command: string;
+    dir: string;
+    newBranch: string;
+    baseBranch: string;
+  }): Promise<void> {
+    const tpl = params.command.trim();
+    if (!tpl) return;
+    const command = substituteTemplate(tpl, {
+      new_branch: params.newBranch,
+      worktree_path: params.dir,
+      base_branch: params.baseBranch,
+    });
+    this.log?.appendLine(`worktrees: bootstrap (cwd=${params.dir}) → ${command}`);
+    await runShellCommand(command, params.dir, this.log);
   }
 
   /**
@@ -269,4 +297,80 @@ function detailFromError(err: unknown): string {
 
 function normalize(p: string): string {
   return path.normalize(p.trim());
+}
+
+/**
+ * Replace `{name}` placeholders with values from `vars`. `{{` and `}}` escape
+ * literal braces. Unknown placeholders are left intact so the failure surfaces
+ * in the shell rather than silently producing an empty string.
+ */
+export function substituteTemplate(
+  template: string,
+  vars: Record<string, string>
+): string {
+  return template.replace(/\{\{|\}\}|\{(\w+)\}/g, (m, key) => {
+    if (m === '{{') return '{';
+    if (m === '}}') return '}';
+    return Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : m;
+  });
+}
+
+/**
+ * Run `command` via the system shell (cmd.exe on Windows, /bin/sh on Unix),
+ * streaming stdout/stderr line-by-line to `log`. Resolves on exit code 0,
+ * rejects with a short summary otherwise. Captured stderr is included in
+ * the rejection message so the caller can show it to the user.
+ *
+ * Uses `spawn(..., { shell: true })` rather than `exec()` so we resolve on
+ * the child's `exit` event (process terminated) rather than `close` (all
+ * stdio handles closed) — on Windows, handle closure can lag the actual
+ * process exit by tens of seconds when an AV/Defender scan is in progress
+ * on the spawned binary, leaving the user staring at a "still running"
+ * lock for a `sleep 5` that already terminated.
+ */
+function runShellCommand(
+  command: string,
+  cwd: string,
+  log: vscode.OutputChannel | undefined
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    log?.appendLine(`worktrees: spawn t=0ms`);
+    const child = spawn(command, { cwd, shell: true });
+    const tail: string[] = [];
+    const pushTail = (chunk: string) => {
+      for (const line of chunk.split(/\r?\n/)) {
+        if (!line) continue;
+        tail.push(line);
+        if (tail.length > 10) tail.shift();
+        log?.appendLine(`worktrees:   ${line}`);
+      }
+    };
+    child.stdout?.on('data', (d) => pushTail(String(d)));
+    child.stderr?.on('data', (d) => pushTail(String(d)));
+    let settled = false;
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      log?.appendLine(`worktrees: spawn error t=${Date.now() - t0}ms — ${err.message}`);
+      reject(err);
+    });
+    child.on('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      log?.appendLine(
+        `worktrees: child exit t=${Date.now() - t0}ms code=${code} signal=${signal ?? '-'}`
+      );
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason =
+        signal != null
+          ? `terminated by signal ${signal}`
+          : `exited with code ${code}`;
+      const summary = tail.slice(-5).join(' | ');
+      reject(new Error(summary ? `${reason} — ${summary}` : reason));
+    });
+  });
 }
