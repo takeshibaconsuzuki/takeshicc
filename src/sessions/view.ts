@@ -604,7 +604,7 @@ function renderHtml(webview: vscode.Webview): string {
 <div id="modal-backdrop" class="modal-backdrop" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <h2 id="modal-title">Create Worktree</h2>
-    <label for="wt-name">Branch name</label>
+    <label for="wt-name">New branch name (leave empty to check out base)</label>
     <input id="wt-name" type="text" autocomplete="off" spellcheck="false" />
     <label for="wt-base">Base branch</label>
     <select id="wt-base"></select>
@@ -800,7 +800,7 @@ function renderHtml(webview: vscode.Webview): string {
       if (b === lastState.defaultBase) opt.selected = true;
       wtBase.appendChild(opt);
     }
-    wtDir.value = joinPath(lastState.parentDir, 'worktree');
+    wtDir.value = joinPath(lastState.parentDir, lastState.defaultBase || 'worktree');
 
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
@@ -843,11 +843,13 @@ function renderHtml(webview: vscode.Webview): string {
     vscode.postMessage({ type: 'selectWorktree', path: wtSelect.value });
   });
 
-  wtName.addEventListener('input', () => {
-    if (!userEditedDir) {
-      wtDir.value = joinPath(lastState.parentDir, wtName.value || 'worktree');
-    }
-  });
+  function autofillDir() {
+    if (userEditedDir) return;
+    const base = wtName.value || wtBase.value || 'worktree';
+    wtDir.value = joinPath(lastState.parentDir, base);
+  }
+  wtName.addEventListener('input', autofillDir);
+  wtBase.addEventListener('change', autofillDir);
   wtDir.addEventListener('input', () => { userEditedDir = true; });
   wtCancel.addEventListener('click', closeModal);
   modal.addEventListener('click', (ev) => {
@@ -862,7 +864,6 @@ function renderHtml(webview: vscode.Webview): string {
     const name = wtName.value.trim();
     const baseBranch = wtBase.value;
     const dir = wtDir.value.trim();
-    if (!name) { wtError.textContent = 'Branch name is required'; return; }
     if (!dir) { wtError.textContent = 'Worktree directory is required'; return; }
     if (!baseBranch) { wtError.textContent = 'Base branch is required'; return; }
     wtError.textContent = '';

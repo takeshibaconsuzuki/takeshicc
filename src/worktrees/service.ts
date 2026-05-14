@@ -142,8 +142,13 @@ export class WorktreeService {
   }
 
   /**
-   * Create a new worktree at `dir` with a new branch `name` based on `baseBranch`.
-   * Throws on git failure (e.g. branch exists, dir exists).
+   * Create a worktree at `dir`. If `name` is empty it defaults to `baseBranch`,
+   * which is always an existing branch — so the worktree checks out that
+   * branch directly. Otherwise: if `name` matches an existing local branch,
+   * check it out (`baseBranch` is ignored — git won't let two branches share
+   * a name); else create a new branch `name` off `baseBranch`.
+   *
+   * Throws on git failure (e.g. dir exists, branch already checked out elsewhere).
    */
   async create(params: {
     name: string;
@@ -153,20 +158,23 @@ export class WorktreeService {
     if (!this.workspaceRoot) {
       throw new Error('No workspace open');
     }
-    const { name, baseBranch, dir } = params;
-    if (!name.trim()) throw new Error('Branch name is required');
+    const { baseBranch, dir } = params;
     if (!dir.trim()) throw new Error('Worktree directory is required');
     if (!baseBranch.trim()) throw new Error('Base branch is required');
 
+    const name = params.name.trim() || baseBranch;
+    const repo = await this.getRepo();
+    const branchExists = repo?.branches.includes(name) ?? false;
+    const args = branchExists
+      ? ['worktree', 'add', dir, name]
+      : ['worktree', 'add', '-b', name, dir, baseBranch];
+
     this.log?.appendLine(
-      `worktrees: create name=${name} base=${baseBranch} dir=${dir}`
+      `worktrees: create name=${name} base=${baseBranch} dir=${dir} ` +
+        `mode=${branchExists ? 'checkout-existing' : 'new-branch'}`
     );
     try {
-      await execFileP(
-        'git',
-        ['worktree', 'add', '-b', name, dir, baseBranch],
-        { cwd: this.workspaceRoot }
-      );
+      await execFileP('git', args, { cwd: this.workspaceRoot });
     } catch (err) {
       throw new Error(detailFromError(err) || 'git worktree add failed');
     }
