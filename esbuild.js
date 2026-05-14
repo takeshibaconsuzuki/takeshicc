@@ -13,9 +13,9 @@ async function main() {
     sourcesContent: false,
     platform: 'node',
     outfile: 'dist/extension.js',
-    // sql.js is pure-JS but ships a .wasm asset that esbuild can't inline.
-    // Keep external so the wasm resolves at runtime from node_modules.
-    external: ['vscode', 'sql.js'],
+    // better-sqlite3 is a native module — must resolve at runtime from
+    // node_modules so the platform-specific .node binary is loaded.
+    external: ['vscode', 'better-sqlite3'],
     logLevel: 'info',
     target: 'node18',
   });

@@ -21,7 +21,6 @@ let hooksReady: Promise<void> = Promise.resolve();
 
 // Cached at activation so the layout-sizes write doesn't have to rebuild paths.
 let cachedGlobalDbPath: string | undefined;
-let cachedSqlWasmDir: string | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -79,12 +78,6 @@ export function activate(context: vscode.ExtensionContext): void {
     cachedGlobalDbPath = path.join(
       path.dirname(context.globalStorageUri.fsPath),
       'state.vscdb'
-    );
-    cachedSqlWasmDir = path.join(
-      context.extensionPath,
-      'node_modules',
-      'sql.js',
-      'dist'
     );
   }
 
@@ -199,26 +192,21 @@ async function writeLayoutSizesToDb(
   sidebarPx: number,
   panelPx: number
 ): Promise<void> {
-  if (!cachedGlobalDbPath || !cachedSqlWasmDir) {
+  if (!cachedGlobalDbPath) {
     throw new Error('writeLayoutSizesToDb: paths not initialized');
   }
-  const buf = await fs.readFile(cachedGlobalDbPath);
-
-  const initSqlJs = require('sql.js') as typeof import('sql.js').default;
-  const SQL = await initSqlJs({
-    locateFile: (file: string) => path.join(cachedSqlWasmDir!, file),
-  });
-  const db = new SQL.Database(new Uint8Array(buf));
+  // better-sqlite3 operates on disk via mmap/pread — no whole-file load, so
+  // this works regardless of how large the DB has grown (e.g. Cursor's
+  // multi-GB cursorDiskKV table).
+  const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+  const db = new Database(cachedGlobalDbPath);
   try {
     const stmt = db.prepare(
       'INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)'
     );
-    stmt.run(['workbench.sideBar.size', String(sidebarPx)]);
-    stmt.run(['workbench.panel.size', String(panelPx)]);
-    stmt.run(['workbench.panel.lastNonMaximizedWidth', String(panelPx)]);
-    stmt.free();
-    const exported = db.export();
-    await fs.writeFile(cachedGlobalDbPath, Buffer.from(exported));
+    stmt.run('workbench.sideBar.size', String(sidebarPx));
+    stmt.run('workbench.panel.size', String(panelPx));
+    stmt.run('workbench.panel.lastNonMaximizedWidth', String(panelPx));
   } finally {
     db.close();
   }

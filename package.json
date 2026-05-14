@@ -141,12 +141,13 @@
     "package": "node esbuild.js --production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "vsix": "npm run package && vsce package"
+    "rebuild:electron": "cd node_modules/better-sqlite3 && prebuild-install --runtime electron --target 39.8.1",
+    "vsix": "npm run package && npm run rebuild:electron && vsce package"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^22.0.0",
-    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
@@ -156,7 +157,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "fs-extra": "^11.3.4",
-    "sql.js": "^1.14.1"
+    "better-sqlite3": "^12.10.0",
+    "fs-extra": "^11.3.4"
   }
 }

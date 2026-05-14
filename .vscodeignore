@@ -22,10 +22,16 @@ CLAUDE.local.md
 
 # Block all of node_modules by default. The bundle in dist/extension.js
 # already inlines pure-JS deps via esbuild; the only modules we still need
-# to ship are the externals marked in esbuild.js (sql.js).
+# to ship are the externals marked in esbuild.js (better-sqlite3).
 node_modules/**
 
-# sql.js — pure-JS SQLite via WASM, used to read/write workspace state.vscdb.
-!node_modules/sql.js/dist/sql-wasm.js
-!node_modules/sql.js/dist/sql-wasm.wasm
-!node_modules/sql.js/package.json
+# better-sqlite3 — native SQLite binding, used to write VS Code's global
+# state.vscdb (handles multi-GB DBs that sql.js's whole-file load can't).
+# `bindings` + `file-uri-to-path` are runtime deps that locate the .node binary.
+!node_modules/better-sqlite3/package.json
+!node_modules/better-sqlite3/lib/**
+!node_modules/better-sqlite3/build/Release/better_sqlite3.node
+!node_modules/bindings/package.json
+!node_modules/bindings/bindings.js
+!node_modules/file-uri-to-path/package.json
+!node_modules/file-uri-to-path/index.js
