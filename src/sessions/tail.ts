@@ -133,7 +133,7 @@ function stringifyMessage(m: SessionMessage): string {
     }
     // thinking, image, etc. → skip
   }
-  return parts.join('\n').trim();
+  return parts.join('\n').split('\n').filter((l) => l.trim() !== '').join('\n');
 }
 
 function formatToolUse(name: string, input: unknown): string {
