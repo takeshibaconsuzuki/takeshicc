@@ -48,6 +48,25 @@ On activation the extension also stands up a loopback-only HTTP MCP server backe
 
 The server currently exposes no tools — kept as scaffolding for future additions.
 
+### 5. Git worktree management
+
+The sessions sidebar also lists this repo's git worktrees and lets you create and remove them inline. Click a worktree row to select it — `New Chat` then spawns `claude` with that worktree's directory as cwd, so the chat is scoped to that branch. The selected worktree persists for the lifetime of the window; clicking the main worktree resets it to the workspace root.
+
+- **`+` New Worktree** — opens a modal asking for a base branch (any local branch), a new branch name (leave empty to check out the base branch directly), and a directory. If the name matches an existing local branch the worktree checks it out; otherwise a fresh branch is created off the base. Defaults are remembered between invocations.
+- **Bootstrap command.** Set `takeshicc.worktrees.bootstrapCommand` to a shell command that runs in the new worktree's directory immediately after `git worktree add` succeeds. Placeholders `{new_branch}`, `{worktree_path}`, `{base_branch}` are substituted (use `{{` / `}}` for literal braces). Runs via the system shell (`cmd.exe` on Windows, `/bin/sh` on Unix) in the background, so multiple creates can have bootstraps in flight at once. Each worktree row shows a spinner in place of its delete button until that bootstrap exits; row selection and deletion are blocked for the path during that window. A VS Code notification fires on success or failure (with a link to the Takeshi CC output channel). Example: `npm install && cp ../main/.env .env`.
+- **Delete worktree.** Each non-main row has a trash icon that removes the worktree and deletes its branch. Branch delete is always `-D` (squash-merge workflows leave feature commits unreachable from main, so `-d` refuses even after the PR lands). If the worktree directory is already gone, missing-path is treated as success and `git worktree prune` runs first so the branch delete doesn't trip over stale metadata. If `git worktree remove` complains about uncommitted changes, a confirm dialog offers to retry with `--force`.
+
+Hooks and the MCP server are installed into each worktree's `.claude/settings.local.json` / `~/.claude.json` slot the first time the extension sees `claude` start in it, so session status indicators work for chats running in any worktree, not just the workspace root.
+
+### 6. Layout sizes
+
+Run **`Takeshi CC: Apply Layout Sizes`** from the command palette to write fixed pixel widths to VS Code's global `state.vscdb` for the sidebar and panel. Useful when you want the sidebar and terminal panel to come up at exactly the same size every window. Configured via:
+
+- `takeshicc.layout.sidebarSizePx` (default `480`) → `workbench.sideBar.size`
+- `takeshicc.layout.panelSizePx` (default `640`) → `workbench.panel.size` (and `workbench.panel.lastNonMaximizedWidth`)
+
+After running the command, VS Code must be **quit** rather than reloaded — the shutdown-persist routine writes the live layout state back to `state.vscdb`, which clobbers any direct write. The command shows a notification offering to quit immediately. `sql.js` opens the SQLite file in-process; no external sqlite binary required.
+
 ## Install
 
 ```bash
@@ -78,6 +97,13 @@ Or pick your own key — add to `keybindings.json`:
 }
 ```
 
+## Other keybindings
+
+The extension also contributes:
+
+- **`Ctrl+`` (backtick)** — toggle the terminal panel when it's hidden, or toggle-maximize it when it's already visible. Replaces VS Code's default which only toggles visibility.
+- **`PageUp` / `PageDown`** (terminal focus) — send the raw `ESC[5~` / `ESC[6~` escape sequences to the terminal instead of letting VS Code's default scroll-by-page handler swallow them. This lets `claude`'s TUI page through long histories with PageUp/PageDown.
+
 ## Requirements
 
 - VS Code / Cursor 1.93 or newer (for the shell-integration execution events used to detect `claude` starting and exiting).
@@ -103,7 +129,7 @@ Unit tests live under `test/` and cover the pure helpers: `buildReference` (sele
 
 - **Single workspace folder.** Multi-root workspaces only show sessions for the first folder.
 - **Claude sessions started before the extension activates are not tracked** until you re-run `claude` in that terminal (shell-start events only fire on new executions). A window reload has the same effect — any tracked sessions from before the reload become untracked.
-- **Sessions from sibling git worktrees are included** (the SDK's `listSessions` default). Usually what you want; not currently configurable.
+- **Sessions from sibling git worktrees are included** (the SDK's `listSessions` default). Usually what you want — the sidebar's worktree section lets you switch which worktree `New Chat` uses, but the session list itself is not filtered by worktree.
 - **Non-`file://` editors are ignored** by the reference command (untitled, remote, notebooks).
 - **Status relies on hooks registered in `.claude/settings.local.json`** — if the file isn't writable (permissions, read-only mount), the sidebar falls back to showing every session as inactive.
 - **Multiple VS Code windows on the same workspace overwrite each other's hook port.** Last writer wins; the other window's server still runs but stops receiving events. Reload the losing window to re-register. The MCP server has the same property — both windows write to the same `projects.<workspaceRoot>.mcpServers.takeshicc` slot, so the most recently activated window owns the entry. Different workspaces don't collide.
