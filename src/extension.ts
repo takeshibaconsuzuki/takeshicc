@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { buildReference } from './reference';
 import { resolveTargetTerminal, TerminalTracker } from './terminals';
 import { SessionService } from './sessions/service';
@@ -17,6 +19,10 @@ const NEW_CHAT_POLL_MS = 1_000;
 
 let activeWorkspaceRoot: string | undefined;
 let hooksReady: Promise<void> = Promise.resolve();
+
+// Cached at activation so the layout-sizes write doesn't have to rebuild paths.
+let cachedGlobalDbPath: string | undefined;
+let cachedSqlWasmDir: string | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -52,6 +58,19 @@ export function activate(context: vscode.ExtensionContext): void {
   void bootstrapMcp(mcpServer, workspaceRoot, log);
   void ensurePanelLeft(log);
 
+  if (context.globalStorageUri) {
+    cachedGlobalDbPath = path.join(
+      path.dirname(context.globalStorageUri.fsPath),
+      'state.vscdb'
+    );
+    cachedSqlWasmDir = path.join(
+      context.extensionPath,
+      'node_modules',
+      'sql.js',
+      'dist'
+    );
+  }
+
   context.subscriptions.push(
     log,
     tracker,
@@ -77,8 +96,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('takeshicc.newChat', () =>
       newChatCommand(service, provider, tracker, hookStates, log, workspaceRoot)
     ),
-    vscode.commands.registerCommand('takeshicc.applyLayout', () =>
-      applyLayoutCommand(log)
+    vscode.commands.registerCommand('takeshicc.applyLayoutSizes', () =>
+      applyLayoutSizesCommand(context, log)
     ),
 
     // Observe claude invocations in ANY terminal. When the user types `claude`
@@ -149,60 +168,63 @@ export async function deactivate(): Promise<void> {
   }
 }
 
-// `decreaseViewSize` shrinks by a percentage of current size, not a fixed
-// pixel delta — so we approach minimum asymptotically. 100 lands within
-// ~1px of min on any reasonable display.
-const SHRINK_TO_MIN_STEPS = 100;
+async function writeLayoutSizesToDb(
+  sidebarPx: number,
+  panelPx: number
+): Promise<void> {
+  if (!cachedGlobalDbPath || !cachedSqlWasmDir) {
+    throw new Error('writeLayoutSizesToDb: paths not initialized');
+  }
+  const buf = await fs.readFile(cachedGlobalDbPath);
 
-async function applyLayoutCommand(log: vscode.OutputChannel): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration('takeshicc.layout');
-  const sidebarNudges = Math.max(0, cfg.get<number>('sidebarNudges', 10));
-  const panelNudges = Math.max(0, cfg.get<number>('panelNudges', 10));
-
-  // Phase 1: shrink both to minimum (editor area absorbs the released space).
-  await focusSidebar(log);
-  await runResize('decrease', SHRINK_TO_MIN_STEPS);
-
-  await focusPanel(log);
-  await runResize('decrease', SHRINK_TO_MIN_STEPS);
-
-  // Phase 2: grow each by the configured nudge count.
-  await focusSidebar(log);
-  await runResize('increase', sidebarNudges);
-
-  await focusPanel(log);
-  await runResize('increase', panelNudges);
-
-  await tryCommand('workbench.action.focusActiveEditorGroup', log);
-}
-
-async function focusSidebar(log: vscode.OutputChannel): Promise<void> {
-  await tryCommand('workbench.action.focusSideBar', log);
-}
-
-async function focusPanel(log: vscode.OutputChannel): Promise<void> {
-  await tryCommand('workbench.action.terminal.focus', log);
-  await tryCommand('workbench.action.focusPanel', log);
-}
-
-async function tryCommand(id: string, log: vscode.OutputChannel): Promise<void> {
+  const initSqlJs = require('sql.js') as typeof import('sql.js').default;
+  const SQL = await initSqlJs({
+    locateFile: (file: string) => path.join(cachedSqlWasmDir!, file),
+  });
+  const db = new SQL.Database(new Uint8Array(buf));
   try {
-    await vscode.commands.executeCommand(id);
-  } catch (err) {
-    log.appendLine(`applyLayout: ${id} FAILED — ${(err as Error).message}`);
+    const stmt = db.prepare(
+      'INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)'
+    );
+    stmt.run(['workbench.sideBar.size', String(sidebarPx)]);
+    stmt.run(['workbench.panel.size', String(panelPx)]);
+    stmt.run(['workbench.panel.lastNonMaximizedWidth', String(panelPx)]);
+    stmt.free();
+    const exported = db.export();
+    await fs.writeFile(cachedGlobalDbPath, Buffer.from(exported));
+  } finally {
+    db.close();
   }
 }
 
-async function runResize(
-  direction: 'increase' | 'decrease',
-  steps: number
+async function applyLayoutSizesCommand(
+  context: vscode.ExtensionContext,
+  log: vscode.OutputChannel
 ): Promise<void> {
-  const cmd =
-    direction === 'increase'
-      ? 'workbench.action.increaseViewSize'
-      : 'workbench.action.decreaseViewSize';
-  for (let i = 0; i < steps; i++) {
-    await vscode.commands.executeCommand(cmd);
+  if (!context.globalStorageUri) {
+    log.appendLine('applyLayoutSizes: no globalStorageUri');
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration('takeshicc.layout');
+  const sidebarPx = cfg.get<number>('sidebarSizePx', 470);
+  const panelPx = cfg.get<number>('panelSizePx', 622);
+
+  try {
+    await writeLayoutSizesToDb(sidebarPx, panelPx);
+    log.appendLine(`applyLayoutSizes: wrote sidebar=${sidebarPx} panel=${panelPx}`);
+  } catch (err) {
+    log.appendLine(`applyLayoutSizes: write FAILED — ${(err as Error).message}`);
+    return;
+  }
+
+  const choice = await vscode.window.showInformationMessage(
+    `Wrote sidebar=${sidebarPx}px, panel=${panelPx}px to global state.vscdb. ` +
+      `Quit VS Code now? (Reload doesn't work — VS Code's shutdown persist clobbers our write. Quitting bypasses that.)`,
+    'Quit VS Code',
+    'Later'
+  );
+  if (choice === 'Quit VS Code') {
+    await vscode.commands.executeCommand('workbench.action.quit');
   }
 }
 

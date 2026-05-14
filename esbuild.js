@@ -32,6 +32,9 @@ const NATIVE_EXTERNALS = [
   // mirrors how lancedb resolves it at runtime; it would otherwise be
   // duplicated by esbuild bundling and break instanceof checks.
   'apache-arrow',
+  // sql.js is pure-JS but ships a .wasm asset that esbuild can't inline.
+  // Keep external so the wasm resolves at runtime from node_modules.
+  'sql.js',
 ];
 
 // claude-context-core eagerly requires @zilliz/milvus2-sdk-node and faiss-node

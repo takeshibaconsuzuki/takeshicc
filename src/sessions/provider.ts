@@ -16,7 +16,7 @@ export class SessionTreeDataProvider
 
   constructor(
     private readonly service: SessionService,
-    private readonly tracker: TerminalTracker,
+    tracker: TerminalTracker,
     private readonly hookStates: HookStateMachine
   ) {
     const fireChange = () => this.emitter.fire(undefined);

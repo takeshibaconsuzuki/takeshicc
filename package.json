@@ -36,8 +36,8 @@
         "icon": "$(add)"
       },
       {
-        "command": "takeshicc.applyLayout",
-        "title": "Takeshi CC: Apply Layout"
+        "command": "takeshicc.applyLayoutSizes",
+        "title": "Takeshi CC: Apply Layout Sizes"
       }
     ],
     "keybindings": [
@@ -133,17 +133,17 @@
           "default": true,
           "markdownDescription": "Automatically re-index changed files in the workspace (~10s after a save). Only updates an existing index — won't auto-create one. Disable to control embedding-API spend manually."
         },
-        "takeshicc.layout.sidebarNudges": {
+        "takeshicc.layout.sidebarSizePx": {
           "type": "integer",
-          "default": 10,
+          "default": 480,
           "minimum": 0,
-          "markdownDescription": "Number of `increaseViewWidth` nudges applied to the primary sidebar when running `Takeshi CC: Apply Layout`. Each nudge is ~50–60px depending on VS Code version and display."
+          "markdownDescription": "Sidebar width in pixels written to VS Code's global `state.vscdb` (key `workbench.sideBar.size`) when running `Takeshi CC: Apply Layout Sizes`. Requires a window reload."
         },
-        "takeshicc.layout.panelNudges": {
+        "takeshicc.layout.panelSizePx": {
           "type": "integer",
-          "default": 10,
+          "default": 640,
           "minimum": 0,
-          "markdownDescription": "Number of `increaseViewWidth` nudges applied to the panel (terminals) when running `Takeshi CC: Apply Layout`. Each nudge is ~50–60px depending on VS Code version and display."
+          "markdownDescription": "Panel width (or height, when on bottom/top) in pixels written to VS Code's global `state.vscdb` (key `workbench.panel.size`) when running `Takeshi CC: Apply Layout Sizes`. Requires a window reload."
         }
       }
     }
@@ -159,6 +159,7 @@
   "devDependencies": {
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^22.0.0",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
@@ -171,6 +172,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@zilliz/claude-context-core": "^0.1.11",
     "apache-arrow": "^18.1.0",
-    "fs-extra": "^11.3.4"
+    "fs-extra": "^11.3.4",
+    "sql.js": "^1.14.1"
   }
 }

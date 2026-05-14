@@ -64,6 +64,11 @@ node_modules/apache-arrow/bin/**
 !node_modules/tslib/**
 !node_modules/flatbuffers/**
 
+# sql.js — pure-JS SQLite via WASM, used to read/write workspace state.vscdb.
+!node_modules/sql.js/dist/sql-wasm.js
+!node_modules/sql.js/dist/sql-wasm.wasm
+!node_modules/sql.js/package.json
+
 # Within the tree-sitter packages, node-gyp-build loads from prebuilds/
 # at runtime, so the C parser sources, build configs, and grammar JSON
 # are not needed in the .vsix. Strip them to keep package size sane.
