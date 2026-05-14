@@ -11,6 +11,7 @@ import { HookStateMachine } from './hooks/stateMachine';
 import { installHooks, uninstallHooks } from './hooks/settings';
 import { McpHttpServer } from './mcp/server';
 import { registerMcpServer, unregisterMcpServer } from './mcp/settings';
+import { WorktreeService } from './worktrees/service';
 
 const AUTO_REFRESH_MS = 30_000;
 const NEW_CHAT_POLL_MS = 1_000;
@@ -33,6 +34,19 @@ export function activate(context: vscode.ExtensionContext): void {
   const hookStates = new HookStateMachine();
   const hookServer = new HookServer();
   const mcpServer = new McpHttpServer(log);
+  const worktreeEmitter = new vscode.EventEmitter<void>();
+  const worktrees = new WorktreeService(workspaceRoot, worktreeEmitter, log);
+
+  // Selected worktree drives the cwd used by newChat. Defaults to the
+  // workspace root; updated by the dropdown in the Sessions webview.
+  let selectedWorktreePath: string = workspaceRoot ?? '';
+  const selectionState = {
+    getSelectedWorktree: () => selectedWorktreePath || workspaceRoot || '',
+    setSelectedWorktree: (p: string) => {
+      selectedWorktreePath = p;
+    },
+  };
+
   const provider = new SessionsWebviewViewProvider(
     context.extensionUri,
     service,
@@ -40,6 +54,8 @@ export function activate(context: vscode.ExtensionContext): void {
     hookStates,
     workspaceRoot,
     'takeshicc.openSession',
+    worktrees,
+    selectionState,
     log
   );
 
@@ -78,6 +94,7 @@ export function activate(context: vscode.ExtensionContext): void {
     hookServer,
     mcpServer,
     provider,
+    worktreeEmitter,
     vscode.commands.registerCommand(
       'takeshicc.insertReference',
       insertReferenceCommand
@@ -96,7 +113,14 @@ export function activate(context: vscode.ExtensionContext): void {
         openSessionCommand(sessionId, service, tracker, hookStates, log, workspaceRoot)
     ),
     vscode.commands.registerCommand('takeshicc.newChat', () =>
-      newChatCommand(service, provider, tracker, hookStates, log, workspaceRoot)
+      newChatCommand(
+        service,
+        provider,
+        tracker,
+        hookStates,
+        log,
+        selectionState.getSelectedWorktree() || workspaceRoot
+      )
     ),
     vscode.commands.registerCommand('takeshicc.applyLayoutSizes', () =>
       applyLayoutSizesCommand(context, log)
@@ -345,9 +369,13 @@ async function openSessionCommand(
 
   const info = await service.getInfo(sessionId);
   const label = info?.customTitle?.trim() || info?.summary?.trim() || sessionId.slice(0, 8);
+  // Prefer the session's recorded cwd so a chat started in a worktree resumes
+  // in that worktree. Falls back to the workspace root if the path no longer
+  // exists (e.g. the worktree was removed).
+  const sessionCwd = await resolveSessionCwd(info?.cwd, cwd, log);
   const terminal = vscode.window.createTerminal({
     name: `Claude: ${label}`,
-    cwd,
+    cwd: sessionCwd,
   });
   tracker.markOwned(terminal);
   tracker.register(sessionId, terminal);
@@ -422,4 +450,22 @@ async function attachNewSession(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function resolveSessionCwd(
+  sessionCwd: string | undefined,
+  fallback: string | undefined,
+  log: vscode.OutputChannel
+): Promise<string | undefined> {
+  if (!sessionCwd) return fallback;
+  try {
+    const stat = await fs.stat(sessionCwd);
+    if (stat.isDirectory()) return sessionCwd;
+  } catch {
+    // dir gone (worktree removed, etc.) — fall through
+  }
+  log.appendLine(
+    `openSession: session cwd ${sessionCwd} unavailable, falling back to ${fallback ?? '<none>'}`
+  );
+  return fallback;
 }

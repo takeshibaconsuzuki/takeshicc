@@ -5,6 +5,7 @@ import { HookStateMachine } from '../hooks/stateMachine';
 import { mapHookStatus, type SessionStatus } from './statusResolver';
 import { formatRelativeTime } from './time';
 import { TailCache } from './tail';
+import type { WorktreeService, Worktree } from '../worktrees/service';
 
 const SLOW_TICK_MS = 30_000;
 // Claude fires Stop/idle_prompt before the JSONL is fully flushed; an
@@ -18,21 +19,36 @@ interface RowState {
   sessionId: string;
   status: SessionStatus;
   topic: string;
+  branch: string | null;
   tail: string;
   timeLabel: string;
+}
+
+interface WorktreeOption {
+  path: string;
+  label: string;
+  branch: string | null;
+  isMain: boolean;
 }
 
 interface ViewState {
   rows: RowState[];
   tailLines: number;
   empty: string | null;
+  worktrees: WorktreeOption[];
+  selectedWorktree: string | null;
+  branches: string[];
+  defaultBase: string | null;
+  parentDir: string | null;
+  hasRepo: boolean;
 }
 
 /**
- * Webview-backed Sessions sidebar. A grid of rows: status icon, topic + tail
- * (last message excerpt, lighter shade), and a right-aligned time. The
- * tail is clamped to a configurable number of lines via CSS
- * `-webkit-line-clamp` (`takeshicc.sessions.tailLines`, default 2).
+ * Webview-backed Sessions sidebar. A header bar with [new chat] [create
+ * worktree] [worktree dropdown], followed by a grid of session rows. The
+ * worktree dropdown selection controls which directory `claude` is spawned
+ * in when New Chat is pressed — both via this button and the global
+ * `takeshicc.newChat` command.
  *
  * Two refresh paths:
  *   - **fast path** (hook events): re-derive status/time from cached
@@ -59,8 +75,13 @@ export class SessionsWebviewViewProvider
     private readonly service: SessionService,
     tracker: TerminalTracker,
     private readonly hookStates: HookStateMachine,
-    workspaceRoot: string | undefined,
+    private readonly workspaceRoot: string | undefined,
     private readonly openSessionCommand: string,
+    private readonly worktrees: WorktreeService,
+    private readonly state: {
+      getSelectedWorktree(): string;
+      setSelectedWorktree(p: string): void;
+    },
     private readonly log: vscode.OutputChannel
   ) {
     this.tailCache = new TailCache(workspaceRoot, log);
@@ -85,6 +106,10 @@ export class SessionsWebviewViewProvider
         this.scheduleRefresh(false);
         if (turnedGreen) this.scheduleDelayedSlowRefresh();
       }),
+      this.worktrees.onDidChange(() => {
+        this.log.appendLine('sessions: worktrees change → scheduleRefresh(slow=true)');
+        this.scheduleRefresh(true);
+      }),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('takeshicc.sessions.tailLines')) {
           this.log.appendLine('sessions: tailLines config change → scheduleRefresh(slow=true)');
@@ -101,11 +126,7 @@ export class SessionsWebviewViewProvider
       localResourceRoots: [this.extensionUri],
     };
     view.webview.html = renderHtml(view.webview);
-    view.webview.onDidReceiveMessage((msg) => {
-      if (msg?.type === 'open' && typeof msg.sessionId === 'string') {
-        void vscode.commands.executeCommand(this.openSessionCommand, msg.sessionId);
-      }
-    });
+    view.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
     view.onDidDispose(() => {
       this.view = undefined;
       if (this.slowTimer) {
@@ -123,6 +144,67 @@ export class SessionsWebviewViewProvider
   /** Public entry — forces a slow refresh (matches the old TreeView refresh). */
   async refresh(): Promise<void> {
     await this.pushState(true);
+  }
+
+  private handleMessage(msg: unknown): void {
+    if (!msg || typeof msg !== 'object') return;
+    const m = msg as { type?: unknown };
+    if (m.type === 'open' && typeof (m as { sessionId?: unknown }).sessionId === 'string') {
+      void vscode.commands.executeCommand(
+        this.openSessionCommand,
+        (m as { sessionId: string }).sessionId
+      );
+      return;
+    }
+    if (m.type === 'newChat') {
+      void vscode.commands.executeCommand('takeshicc.newChat');
+      return;
+    }
+    if (m.type === 'selectWorktree' && typeof (m as { path?: unknown }).path === 'string') {
+      const p = (m as { path: string }).path;
+      this.log.appendLine(`sessions: selectWorktree → ${p}`);
+      this.state.setSelectedWorktree(p);
+      this.scheduleRefresh(false);
+      return;
+    }
+    if (m.type === 'createWorktree') {
+      const params = m as { name?: unknown; baseBranch?: unknown; dir?: unknown };
+      if (
+        typeof params.name === 'string' &&
+        typeof params.baseBranch === 'string' &&
+        typeof params.dir === 'string'
+      ) {
+        void this.handleCreateWorktree(params.name, params.baseBranch, params.dir);
+      }
+      return;
+    }
+    if (m.type === 'refreshWorktrees') {
+      this.scheduleRefresh(true);
+      return;
+    }
+  }
+
+  private async handleCreateWorktree(
+    name: string,
+    baseBranch: string,
+    dir: string
+  ): Promise<void> {
+    const view = this.view;
+    try {
+      await this.worktrees.create({ name, baseBranch, dir });
+      this.log.appendLine(`sessions: createWorktree OK name=${name}`);
+      view?.webview.postMessage({ type: 'createWorktreeResult', ok: true, path: dir });
+      this.state.setSelectedWorktree(dir);
+      await this.pushState(true);
+    } catch (err) {
+      const message = (err as Error).message;
+      this.log.appendLine(`sessions: createWorktree FAILED — ${message}`);
+      view?.webview.postMessage({
+        type: 'createWorktreeResult',
+        ok: false,
+        error: message,
+      });
+    }
   }
 
   /**
@@ -167,7 +249,10 @@ export class SessionsWebviewViewProvider
     if (!view) return;
     const tailLines = readTailLines();
     const t0 = Date.now();
-    const sessions = await this.service.list(slow);
+    const [sessions, repo] = await Promise.all([
+      this.service.list(slow),
+      this.worktrees.getRepo(slow),
+    ]);
     const listMs = Date.now() - t0;
     this.log.appendLine(
       `sessions: pushState slow=${slow} list=${sessions.length} listMs=${listMs} tailLines=${tailLines}`
@@ -188,15 +273,34 @@ export class SessionsWebviewViewProvider
         sessionId: s.sessionId,
         status,
         topic,
+        branch: s.gitBranch?.trim() || null,
         tail,
         timeLabel: formatRelativeTime(s.lastModified),
       });
     }
+
+    const worktreeOpts: WorktreeOption[] = (repo?.worktrees ?? []).map((w) =>
+      toOption(w, repo?.repoRoot)
+    );
+    const selected = this.state.getSelectedWorktree();
     const state: ViewState = {
       rows,
       tailLines,
       empty: rows.length === 0 ? 'No sessions yet' : null,
+      worktrees: worktreeOpts,
+      selectedWorktree: worktreeOpts.some((w) => w.path === selected)
+        ? selected
+        : (worktreeOpts[0]?.path ?? null),
+      branches: repo?.branches ?? [],
+      defaultBase: repo?.currentBranch ?? null,
+      parentDir: repo ? parentOf(repo.repoRoot) : null,
+      hasRepo: !!repo,
     };
+    // Reconcile: if the previously-selected worktree disappeared, fall back
+    // to the new selection so subsequent commands see a valid path.
+    if (state.selectedWorktree && state.selectedWorktree !== selected) {
+      this.state.setSelectedWorktree(state.selectedWorktree);
+    }
     void view.webview.postMessage({ type: 'state', state });
   }
 
@@ -211,6 +315,31 @@ export class SessionsWebviewViewProvider
       this.delayedSlowTimer = undefined;
     }
   }
+}
+
+function toOption(w: Worktree, repoRoot: string | undefined): WorktreeOption {
+  const base = w.isMain
+    ? (repoRoot ? basename(repoRoot) : basename(w.path))
+    : basename(w.path);
+  const branchSuffix = w.branch ? ` (${w.branch})` : ' (detached)';
+  return {
+    path: w.path,
+    label: base + branchSuffix,
+    branch: w.branch,
+    isMain: w.isMain,
+  };
+}
+
+function basename(p: string): string {
+  const norm = p.replace(/[\\/]+$/, '');
+  const idx = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'));
+  return idx === -1 ? norm : norm.slice(idx + 1);
+}
+
+function parentOf(p: string): string {
+  const norm = p.replace(/[\\/]+$/, '');
+  const idx = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'));
+  return idx === -1 ? norm : norm.slice(0, idx);
 }
 
 function readTailLines(): number {
@@ -239,7 +368,48 @@ function renderHtml(webview: vscode.Webview): string {
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
   }
-  body { padding: 4px 0; }
+  body { padding: 0; }
+  .header {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  }
+  .header button {
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid transparent;
+    padding: 3px 6px;
+    cursor: pointer;
+    font: inherit;
+    border-radius: 3px;
+    line-height: 1;
+  }
+  .header button:hover {
+    background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  }
+  .header button:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  .header button[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .header .spacer { flex: 0 0 4px; }
+  .header select {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border, transparent);
+    padding: 2px 4px;
+    font: inherit;
+    border-radius: 2px;
+  }
+  .header select[disabled] { opacity: 0.4; }
+  .list { padding: 4px 0; }
   .empty {
     padding: 8px 12px;
     color: var(--vscode-descriptionForeground);
@@ -278,6 +448,13 @@ function renderHtml(webview: vscode.Webview): string {
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .col-mid { min-width: 0; }
+  .branch {
+    font-size: 0.85em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 1px;
+  }
   .topic {
     white-space: nowrap;
     overflow: hidden;
@@ -300,15 +477,151 @@ function renderHtml(webview: vscode.Webview): string {
     white-space: nowrap;
     margin-top: 1px;
   }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: none;
+    z-index: 10;
+  }
+  .modal-backdrop.open { display: flex; align-items: flex-start; justify-content: center; }
+  .modal {
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-panel-border, var(--vscode-focusBorder));
+    border-radius: 4px;
+    padding: 12px;
+    margin-top: 40px;
+    width: min(360px, calc(100% - 24px));
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  }
+  .modal h2 {
+    margin: 0 0 8px;
+    font-size: 1em;
+    font-weight: 600;
+  }
+  .modal label {
+    display: block;
+    font-size: 0.9em;
+    margin-top: 8px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .modal input, .modal select {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 2px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    padding: 4px 6px;
+    font: inherit;
+    border-radius: 2px;
+  }
+  .modal .error {
+    color: var(--vscode-errorForeground);
+    font-size: 0.85em;
+    margin-top: 8px;
+    white-space: pre-wrap;
+    min-height: 1em;
+  }
+  .modal .actions {
+    margin-top: 12px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .modal .actions button {
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-button-border, transparent);
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+    border-radius: 2px;
+  }
+  .modal .actions button.primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .modal .actions button.primary:hover {
+    background: var(--vscode-button-hoverBackground);
+  }
+  .modal .actions button[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
-<div id="list" role="list"></div>
+<div class="header" role="toolbar">
+  <button id="btn-new-chat" title="New Chat" aria-label="New Chat">＋</button>
+  <button id="btn-create-worktree" title="Create Worktree" aria-label="Create Worktree">⎘</button>
+  <span class="spacer"></span>
+  <select id="worktree-select" title="Worktree"></select>
+</div>
+<div id="list" class="list" role="list"></div>
+<div id="modal-backdrop" class="modal-backdrop" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title">Create Worktree</h2>
+    <label for="wt-name">Branch name</label>
+    <input id="wt-name" type="text" autocomplete="off" spellcheck="false" />
+    <label for="wt-base">Base branch</label>
+    <select id="wt-base"></select>
+    <label for="wt-dir">Worktree directory</label>
+    <input id="wt-dir" type="text" autocomplete="off" spellcheck="false" />
+    <div id="wt-error" class="error" role="alert"></div>
+    <div class="actions">
+      <button id="wt-cancel">Cancel</button>
+      <button id="wt-create" class="primary">Create</button>
+    </div>
+  </div>
+</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const list = document.getElementById('list');
+  const btnNewChat = document.getElementById('btn-new-chat');
+  const btnCreateWt = document.getElementById('btn-create-worktree');
+  const wtSelect = document.getElementById('worktree-select');
+  const modal = document.getElementById('modal-backdrop');
+  const wtName = document.getElementById('wt-name');
+  const wtBase = document.getElementById('wt-base');
+  const wtDir = document.getElementById('wt-dir');
+  const wtError = document.getElementById('wt-error');
+  const wtCancel = document.getElementById('wt-cancel');
+  const wtCreate = document.getElementById('wt-create');
 
-  function render(state) {
+  /** @type {{ branches: string[], defaultBase: string|null, parentDir: string|null, hasRepo: boolean }} */
+  let lastState = {
+    branches: [],
+    defaultBase: null,
+    parentDir: null,
+    hasRepo: false,
+  };
+  let userEditedDir = false;
+
+  function branchColor(name) {
+    // FNV-1a-ish 32-bit hash → hue in [0, 360). Saturation/lightness chosen
+    // to stay legible on both light and dark VS Code themes.
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < name.length; i++) {
+      h ^= name.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    const hue = h % 360;
+    return 'hsl(' + hue + ', 70%, 50%)';
+  }
+
+  function joinPath(parent, name) {
+    if (!parent) return name;
+    const sep = parent.includes('\\\\') ? '\\\\' : '/';
+    const trimmed = parent.replace(/[\\\\/]+$/, '');
+    const safeName = name.replace(/[^A-Za-z0-9._-]+/g, '-');
+    return trimmed + sep + safeName;
+  }
+
+  function renderRows(state) {
     list.innerHTML = '';
     if (!state.rows.length) {
       const e = document.createElement('div');
@@ -330,6 +643,13 @@ function renderHtml(webview: vscode.Webview): string {
 
       const mid = document.createElement('div');
       mid.className = 'col-mid';
+      if (r.branch) {
+        const branch = document.createElement('div');
+        branch.className = 'branch';
+        branch.textContent = r.branch;
+        branch.style.color = branchColor(r.branch);
+        mid.appendChild(branch);
+      }
       const topic = document.createElement('div');
       topic.className = 'topic';
       topic.textContent = r.topic;
@@ -365,9 +685,112 @@ function renderHtml(webview: vscode.Webview): string {
     }
   }
 
+  function renderHeader(state) {
+    wtSelect.innerHTML = '';
+    if (!state.hasRepo || state.worktrees.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = state.hasRepo ? 'No worktrees' : 'Not a git repo';
+      wtSelect.appendChild(opt);
+      wtSelect.disabled = true;
+      btnCreateWt.disabled = !state.hasRepo;
+    } else {
+      for (const w of state.worktrees) {
+        const opt = document.createElement('option');
+        opt.value = w.path;
+        opt.textContent = w.label;
+        if (w.path === state.selectedWorktree) opt.selected = true;
+        wtSelect.appendChild(opt);
+      }
+      wtSelect.disabled = false;
+      btnCreateWt.disabled = false;
+    }
+  }
+
+  function render(state) {
+    lastState = {
+      branches: state.branches,
+      defaultBase: state.defaultBase,
+      parentDir: state.parentDir,
+      hasRepo: state.hasRepo,
+    };
+    renderHeader(state);
+    renderRows(state);
+  }
+
+  function openModal() {
+    if (!lastState.hasRepo) return;
+    userEditedDir = false;
+    wtName.value = '';
+    wtError.textContent = '';
+    wtCreate.disabled = false;
+
+    wtBase.innerHTML = '';
+    for (const b of lastState.branches) {
+      const opt = document.createElement('option');
+      opt.value = b;
+      opt.textContent = b;
+      if (b === lastState.defaultBase) opt.selected = true;
+      wtBase.appendChild(opt);
+    }
+    wtDir.value = joinPath(lastState.parentDir, 'worktree');
+
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+    setTimeout(() => wtName.focus(), 0);
+  }
+
+  function closeModal() {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+
+  btnNewChat.addEventListener('click', () => vscode.postMessage({ type: 'newChat' }));
+  btnCreateWt.addEventListener('click', openModal);
+  wtSelect.addEventListener('change', () => {
+    vscode.postMessage({ type: 'selectWorktree', path: wtSelect.value });
+  });
+
+  wtName.addEventListener('input', () => {
+    if (!userEditedDir) {
+      wtDir.value = joinPath(lastState.parentDir, wtName.value || 'worktree');
+    }
+  });
+  wtDir.addEventListener('input', () => { userEditedDir = true; });
+  wtCancel.addEventListener('click', closeModal);
+  modal.addEventListener('click', (ev) => {
+    if (ev.target === modal) closeModal();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && modal.classList.contains('open')) {
+      ev.preventDefault();
+      closeModal();
+    }
+  });
+  wtCreate.addEventListener('click', () => {
+    const name = wtName.value.trim();
+    const baseBranch = wtBase.value;
+    const dir = wtDir.value.trim();
+    if (!name) { wtError.textContent = 'Branch name is required'; return; }
+    if (!dir) { wtError.textContent = 'Worktree directory is required'; return; }
+    if (!baseBranch) { wtError.textContent = 'Base branch is required'; return; }
+    wtError.textContent = '';
+    wtCreate.disabled = true;
+    vscode.postMessage({ type: 'createWorktree', name, baseBranch, dir });
+  });
+
   window.addEventListener('message', (ev) => {
     const data = ev.data;
-    if (data && data.type === 'state') render(data.state);
+    if (!data) return;
+    if (data.type === 'state') render(data.state);
+    else if (data.type === 'createWorktreeResult') {
+      if (data.ok) {
+        closeModal();
+      } else {
+        wtError.textContent = data.error || 'Failed to create worktree';
+        wtCreate.disabled = false;
+      }
+    }
   });
 </script>
 </body>

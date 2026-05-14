@@ -99,11 +99,6 @@
     "menus": {
       "view/title": [
         {
-          "command": "takeshicc.newChat",
-          "when": "view == takeshicc.sessions",
-          "group": "navigation@1"
-        },
-        {
           "command": "takeshicc.refreshSessions",
           "when": "view == takeshicc.sessions",
           "group": "navigation@2"
