@@ -178,14 +178,22 @@ export class SessionsWebviewViewProvider
       }
       return;
     }
-    if (m.type === 'deleteWorktree') {
-      const params = m as { path?: unknown; branch?: unknown; force?: unknown };
-      if (typeof params.path === 'string') {
-        void this.handleDeleteWorktree(
-          params.path,
-          typeof params.branch === 'string' ? params.branch : null,
-          params.force === true
-        );
+    if (m.type === 'deleteWorktrees') {
+      const params = m as { items?: unknown; force?: unknown };
+      if (Array.isArray(params.items)) {
+        const items: { path: string; branch: string | null }[] = [];
+        for (const raw of params.items) {
+          if (raw && typeof raw === 'object') {
+            const it = raw as { path?: unknown; branch?: unknown };
+            if (typeof it.path === 'string') {
+              items.push({
+                path: it.path,
+                branch: typeof it.branch === 'string' ? it.branch : null,
+              });
+            }
+          }
+        }
+        void this.handleDeleteWorktrees(items, params.force === true);
       }
       return;
     }
@@ -218,31 +226,33 @@ export class SessionsWebviewViewProvider
     }
   }
 
-  private async handleDeleteWorktree(
-    p: string,
-    branch: string | null,
+  private async handleDeleteWorktrees(
+    items: { path: string; branch: string | null }[],
     force: boolean
   ): Promise<void> {
     const view = this.view;
-    try {
-      await this.worktrees.remove({ path: p, branch, force });
-      this.log.appendLine(`sessions: deleteWorktree OK path=${p}`);
-      view?.webview.postMessage({ type: 'deleteWorktreeResult', ok: true });
-      // If the deleted worktree was selected, fall back to whatever pushState
-      // picks (typically the main worktree).
-      if (this.state.getSelectedWorktree() === p) {
-        this.state.setSelectedWorktree('');
+    const succeeded: string[] = [];
+    const failures: { path: string; error: string }[] = [];
+    for (const it of items) {
+      try {
+        await this.worktrees.remove({ path: it.path, branch: it.branch, force });
+        succeeded.push(it.path);
+        this.log.appendLine(`sessions: deleteWorktree OK path=${it.path}`);
+      } catch (err) {
+        const message = (err as Error).message;
+        this.log.appendLine(`sessions: deleteWorktree FAILED path=${it.path} — ${message}`);
+        failures.push({ path: it.path, error: message });
       }
-      await this.pushState(true);
-    } catch (err) {
-      const message = (err as Error).message;
-      this.log.appendLine(`sessions: deleteWorktree FAILED — ${message}`);
-      view?.webview.postMessage({
-        type: 'deleteWorktreeResult',
-        ok: false,
-        error: message,
-      });
     }
+    if (succeeded.length && succeeded.includes(this.state.getSelectedWorktree())) {
+      this.state.setSelectedWorktree('');
+    }
+    view?.webview.postMessage({
+      type: 'deleteWorktreesResult',
+      succeeded,
+      failures,
+    });
+    if (succeeded.length) await this.pushState(true);
   }
 
   /**
@@ -435,18 +445,31 @@ function renderHtml(webview: vscode.Webview): string {
     opacity: 0.4;
     cursor: not-allowed;
   }
-  .header .spacer { flex: 0 0 4px; }
-  .header select {
+  .header #btn-worktree {
     flex: 1 1 auto;
     min-width: 0;
+    text-align: left;
     background: var(--vscode-dropdown-background);
     color: var(--vscode-dropdown-foreground);
     border: 1px solid var(--vscode-dropdown-border, transparent);
-    padding: 2px 4px;
-    font: inherit;
+    padding: 2px 6px;
     border-radius: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
   }
-  .header select[disabled] { opacity: 0.4; }
+  .header #btn-worktree .wt-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .header #btn-worktree .wt-caret {
+    flex: 0 0 auto;
+    opacity: 0.7;
+  }
   .list { padding: 4px 0; }
   .empty {
     padding: 8px 12px;
@@ -532,8 +555,106 @@ function renderHtml(webview: vscode.Webview): string {
     border-radius: 4px;
     padding: 12px;
     margin-top: 40px;
-    width: min(360px, calc(100% - 24px));
+    width: min(420px, calc(100% - 24px));
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  }
+  .modal hr {
+    border: none;
+    border-top: 1px solid var(--vscode-panel-border, transparent);
+    margin: 14px 0 4px;
+  }
+  .modal .section-title {
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 6px 0 4px;
+  }
+  .modal .wt-search {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    padding: 4px 6px;
+    font: inherit;
+    border-radius: 2px;
+    margin-bottom: 8px;
+  }
+  .modal .wt-list {
+    border: 1px solid var(--vscode-panel-border, transparent);
+    border-radius: 2px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .modal .wt-list:empty::before {
+    content: 'No worktrees match';
+    display: block;
+    padding: 8px;
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+  }
+  .wt-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    column-gap: 8px;
+    align-items: center;
+    padding: 5px 8px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .wt-row:hover { background: var(--vscode-list-hoverBackground); }
+  .wt-row .wt-row-label {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wt-row.selected .wt-row-label-text {
+    color: var(--vscode-textLink-foreground);
+    font-weight: 600;
+  }
+  .wt-row-delete {
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px 6px;
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+    opacity: 0.55;
+  }
+  .wt-row:hover .wt-row-delete { opacity: 0.95; }
+  .wt-row-delete:hover {
+    background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  }
+  .wt-row-delete.force {
+    color: var(--vscode-errorForeground);
+    border-color: var(--vscode-errorForeground);
+    opacity: 1;
+  }
+  .modal .wt-expand {
+    width: 100%;
+    margin-top: 6px;
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-panel-border, transparent);
+    padding: 4px 6px;
+    cursor: pointer;
+    font: inherit;
+    border-radius: 2px;
+  }
+  .modal .wt-expand:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  .modal .wt-delete-error {
+    color: var(--vscode-errorForeground);
+    font-size: 0.85em;
+    margin-top: 6px;
+    white-space: pre-wrap;
   }
   .modal h2 {
     margin: 0 0 8px;
@@ -595,15 +716,22 @@ function renderHtml(webview: vscode.Webview): string {
 <body>
 <div class="header" role="toolbar">
   <button id="btn-new-chat" title="New Chat" aria-label="New Chat">＋</button>
-  <button id="btn-create-worktree" title="Create Worktree" aria-label="Create Worktree">⎘</button>
-  <span class="spacer"></span>
-  <select id="worktree-select" title="Worktree"></select>
-  <button id="btn-delete-worktree" title="Delete Worktree" aria-label="Delete Worktree">🗑</button>
+  <button id="btn-worktree" title="Worktree" aria-label="Worktree" aria-haspopup="dialog">
+    <span class="wt-label">Worktree</span>
+    <span class="wt-caret" aria-hidden="true">▾</span>
+  </button>
 </div>
 <div id="list" class="list" role="list"></div>
 <div id="modal-backdrop" class="modal-backdrop" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-    <h2 id="modal-title">Create Worktree</h2>
+    <h2 id="modal-title">Worktree</h2>
+    <input id="wt-search" class="wt-search" type="text" placeholder="Search worktrees" autocomplete="off" spellcheck="false" />
+    <div id="wt-list" class="wt-list" role="list"></div>
+    <button id="wt-expand" class="wt-expand" type="button" hidden></button>
+    <div id="wt-delete-error" class="wt-delete-error" role="alert"></div>
+
+    <hr />
+    <div class="section-title">Create new worktree</div>
     <label for="wt-name">New branch name (leave empty to check out base)</label>
     <input id="wt-name" type="text" autocomplete="off" spellcheck="false" />
     <label for="wt-base">Base branch</label>
@@ -612,19 +740,8 @@ function renderHtml(webview: vscode.Webview): string {
     <input id="wt-dir" type="text" autocomplete="off" spellcheck="false" />
     <div id="wt-error" class="error" role="alert"></div>
     <div class="actions">
-      <button id="wt-cancel">Cancel</button>
+      <button id="wt-cancel">Close</button>
       <button id="wt-create" class="primary">Create</button>
-    </div>
-  </div>
-</div>
-<div id="del-backdrop" class="modal-backdrop" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-title">
-    <h2 id="del-title">Delete Worktree</h2>
-    <div id="del-summary" style="font-size: 0.9em; color: var(--vscode-descriptionForeground); word-break: break-all;"></div>
-    <div id="del-error" class="error" role="alert"></div>
-    <div class="actions">
-      <button id="del-cancel">Cancel</button>
-      <button id="del-confirm" class="primary">Delete</button>
     </div>
   </div>
 </div>
@@ -632,25 +749,26 @@ function renderHtml(webview: vscode.Webview): string {
   const vscode = acquireVsCodeApi();
   const list = document.getElementById('list');
   const btnNewChat = document.getElementById('btn-new-chat');
-  const btnCreateWt = document.getElementById('btn-create-worktree');
-  const btnDeleteWt = document.getElementById('btn-delete-worktree');
-  const wtSelect = document.getElementById('worktree-select');
+  const btnWorktree = document.getElementById('btn-worktree');
+  const btnWorktreeLabel = btnWorktree.querySelector('.wt-label');
   const modal = document.getElementById('modal-backdrop');
+  const wtSearch = document.getElementById('wt-search');
+  const wtListEl = document.getElementById('wt-list');
+  const wtExpand = document.getElementById('wt-expand');
+  const wtDeleteError = document.getElementById('wt-delete-error');
   const wtName = document.getElementById('wt-name');
   const wtBase = document.getElementById('wt-base');
   const wtDir = document.getElementById('wt-dir');
   const wtError = document.getElementById('wt-error');
   const wtCancel = document.getElementById('wt-cancel');
   const wtCreate = document.getElementById('wt-create');
-  const delModal = document.getElementById('del-backdrop');
-  const delSummary = document.getElementById('del-summary');
-  const delError = document.getElementById('del-error');
-  const delCancel = document.getElementById('del-cancel');
-  const delConfirm = document.getElementById('del-confirm');
-  /** Worktree being deleted; populated when the delete modal opens. */
-  let delTarget = null;
-  /** True once a non-force delete has failed — the next click runs with force. */
-  let delForce = false;
+
+  const LIST_CAP = 10;
+  /** When true, render all matches; otherwise cap at LIST_CAP. */
+  let expanded = false;
+  /** Paths whose previous non-force delete failed; the next click on that row's
+   *  icon retries with force=true. Cleared on success. */
+  const forcePending = new Set();
 
   let lastState = {
     branches: [],
@@ -746,30 +864,19 @@ function renderHtml(webview: vscode.Webview): string {
     }
   }
 
-  function renderHeader(state) {
-    wtSelect.innerHTML = '';
-    if (!state.hasRepo || state.worktrees.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = state.hasRepo ? 'No worktrees' : 'Not a git repo';
-      wtSelect.appendChild(opt);
-      wtSelect.disabled = true;
-      btnCreateWt.disabled = !state.hasRepo;
-      btnDeleteWt.disabled = true;
-      return;
-    }
-    for (const w of state.worktrees) {
-      const opt = document.createElement('option');
-      opt.value = w.path;
-      opt.textContent = w.label;
-      if (w.path === state.selectedWorktree) opt.selected = true;
-      wtSelect.appendChild(opt);
-    }
-    wtSelect.disabled = false;
-    btnCreateWt.disabled = false;
-    // You can't delete the main worktree (git refuses) — disable the button.
+  function worktreeButtonLabel(state) {
+    if (!state.hasRepo) return 'Not a git repo';
+    if (!state.worktrees || state.worktrees.length === 0) return 'No worktrees';
     const sel = state.worktrees.find((w) => w.path === state.selectedWorktree);
-    btnDeleteWt.disabled = !sel || sel.isMain;
+    if (!sel) return 'No worktrees';
+    return sel.branch || '(detached)';
+  }
+
+  function renderHeader(state) {
+    btnWorktreeLabel.textContent = worktreeButtonLabel(state);
+    // The button stays enabled if there's a repo (so the user can create a
+    // worktree even when none exist yet).
+    btnWorktree.disabled = !state.hasRepo;
   }
 
   function render(state) {
@@ -785,13 +892,97 @@ function renderHtml(webview: vscode.Webview): string {
     renderRows(state);
   }
 
+  function filteredWorktrees() {
+    const q = wtSearch.value.trim().toLowerCase();
+    const all = lastState.worktrees || [];
+    if (!q) return all;
+    return all.filter((w) => {
+      const branch = (w.branch || '').toLowerCase();
+      const label = (w.label || '').toLowerCase();
+      const path = (w.path || '').toLowerCase();
+      return branch.includes(q) || label.includes(q) || path.includes(q);
+    });
+  }
+
+  function renderWorktreeList() {
+    wtListEl.innerHTML = '';
+    const filtered = filteredWorktrees();
+    const hiddenCount = expanded ? 0 : Math.max(0, filtered.length - LIST_CAP);
+    const visible = expanded ? filtered : filtered.slice(0, LIST_CAP);
+
+    for (const w of visible) {
+      const row = document.createElement('div');
+      row.className = 'wt-row';
+      row.setAttribute('role', 'listitem');
+      if (w.path === lastState.selectedWorktree) row.classList.add('selected');
+
+      const label = document.createElement('div');
+      label.className = 'wt-row-label';
+      const labelText = document.createElement('span');
+      labelText.className = 'wt-row-label-text';
+      labelText.textContent = w.branch || w.label || w.path;
+      label.appendChild(labelText);
+      row.appendChild(label);
+
+      if (w.isMain) {
+        // Main worktree can't be deleted (git refuses) — empty cell preserves alignment.
+        row.appendChild(document.createElement('span'));
+      } else {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'wt-row-delete';
+        del.textContent = '❌';
+        const isForce = forcePending.has(w.path);
+        if (isForce) del.classList.add('force');
+        del.title = isForce
+          ? 'Previous delete failed. Click to force delete (discards uncommitted changes).'
+          : 'Delete worktree';
+        del.setAttribute('aria-label', del.title);
+        del.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          triggerDelete(w);
+        });
+        row.appendChild(del);
+      }
+
+      row.addEventListener('click', () => {
+        vscode.postMessage({ type: 'selectWorktree', path: w.path });
+        closeModal();
+      });
+
+      wtListEl.appendChild(row);
+    }
+
+    if (hiddenCount > 0) {
+      wtExpand.hidden = false;
+      wtExpand.textContent = 'Expand all (' + hiddenCount + ' more)';
+    } else {
+      wtExpand.hidden = true;
+    }
+  }
+
+  function triggerDelete(w) {
+    if (w.isMain) return;
+    const force = forcePending.has(w.path);
+    wtDeleteError.textContent = '';
+    vscode.postMessage({
+      type: 'deleteWorktrees',
+      items: [{ path: w.path, branch: w.branch }],
+      force,
+    });
+  }
+
   function openModal() {
     if (!lastState.hasRepo) return;
+    expanded = false;
+    forcePending.clear();
+    wtSearch.value = '';
+    wtDeleteError.textContent = '';
+
     userEditedDir = false;
     wtName.value = '';
     wtError.textContent = '';
     wtCreate.disabled = false;
-
     wtBase.innerHTML = '';
     for (const b of lastState.branches) {
       const opt = document.createElement('option');
@@ -802,9 +993,11 @@ function renderHtml(webview: vscode.Webview): string {
     }
     wtDir.value = joinPath(lastState.parentDir, lastState.defaultBase || 'worktree');
 
+    renderWorktreeList();
+
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
-    setTimeout(() => wtName.focus(), 0);
+    setTimeout(() => wtSearch.focus(), 0);
   }
 
   function closeModal() {
@@ -812,35 +1005,16 @@ function renderHtml(webview: vscode.Webview): string {
     modal.setAttribute('aria-hidden', 'true');
   }
 
-  function openDeleteModal() {
-    const sel = (lastState.worktrees || []).find(
-      (w) => w.path === lastState.selectedWorktree
-    );
-    if (!sel || sel.isMain) return;
-    delTarget = sel;
-    delForce = false;
-    delError.textContent = '';
-    delConfirm.textContent = 'Delete';
-    delConfirm.disabled = false;
-    const branchPart = sel.branch ? ' (branch: ' + sel.branch + ')' : '';
-    delSummary.textContent =
-      'Remove ' + sel.path + branchPart + '. The branch will also be deleted.';
-    delModal.classList.add('open');
-    delModal.setAttribute('aria-hidden', 'false');
-    setTimeout(() => delCancel.focus(), 0);
-  }
-
-  function closeDeleteModal() {
-    delModal.classList.remove('open');
-    delModal.setAttribute('aria-hidden', 'true');
-    delTarget = null;
-  }
-
   btnNewChat.addEventListener('click', () => vscode.postMessage({ type: 'newChat' }));
-  btnCreateWt.addEventListener('click', openModal);
-  btnDeleteWt.addEventListener('click', openDeleteModal);
-  wtSelect.addEventListener('change', () => {
-    vscode.postMessage({ type: 'selectWorktree', path: wtSelect.value });
+  btnWorktree.addEventListener('click', openModal);
+
+  wtSearch.addEventListener('input', () => {
+    expanded = false;
+    renderWorktreeList();
+  });
+  wtExpand.addEventListener('click', () => {
+    expanded = true;
+    renderWorktreeList();
   });
 
   function autofillDir() {
@@ -858,7 +1032,6 @@ function renderHtml(webview: vscode.Webview): string {
   document.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape') return;
     if (modal.classList.contains('open')) { ev.preventDefault(); closeModal(); }
-    else if (delModal.classList.contains('open')) { ev.preventDefault(); closeDeleteModal(); }
   });
   wtCreate.addEventListener('click', () => {
     const name = wtName.value.trim();
@@ -871,26 +1044,18 @@ function renderHtml(webview: vscode.Webview): string {
     vscode.postMessage({ type: 'createWorktree', name, baseBranch, dir });
   });
 
-  delCancel.addEventListener('click', closeDeleteModal);
-  delModal.addEventListener('click', (ev) => {
-    if (ev.target === delModal) closeDeleteModal();
-  });
-  delConfirm.addEventListener('click', () => {
-    if (!delTarget) return;
-    delError.textContent = '';
-    delConfirm.disabled = true;
-    vscode.postMessage({
-      type: 'deleteWorktree',
-      path: delTarget.path,
-      branch: delTarget.branch,
-      force: delForce,
-    });
-  });
-
   window.addEventListener('message', (ev) => {
     const data = ev.data;
     if (!data) return;
-    if (data.type === 'state') render(data.state);
+    if (data.type === 'state') {
+      render(data.state);
+      if (modal.classList.contains('open')) {
+        // Drop force-pending entries for worktrees that disappeared.
+        const valid = new Set((lastState.worktrees || []).map((w) => w.path));
+        for (const p of Array.from(forcePending)) if (!valid.has(p)) forcePending.delete(p);
+        renderWorktreeList();
+      }
+    }
     else if (data.type === 'createWorktreeResult') {
       if (data.ok) {
         closeModal();
@@ -899,17 +1064,18 @@ function renderHtml(webview: vscode.Webview): string {
         wtCreate.disabled = false;
       }
     }
-    else if (data.type === 'deleteWorktreeResult') {
-      if (data.ok) {
-        closeDeleteModal();
+    else if (data.type === 'deleteWorktreesResult') {
+      for (const p of data.succeeded || []) forcePending.delete(p);
+      const failures = data.failures || [];
+      if (failures.length > 0) {
+        for (const f of failures) forcePending.add(f.path);
+        wtDeleteError.textContent = failures
+          .map((f) => f.error)
+          .join('\\n');
       } else {
-        delError.textContent = data.error || 'Failed to delete worktree';
-        // Promote subsequent attempt to a force delete so the user can
-        // override uncommitted changes / unmerged branches with one click.
-        delForce = true;
-        delConfirm.textContent = 'Force Delete';
-        delConfirm.disabled = false;
+        wtDeleteError.textContent = '';
       }
+      renderWorktreeList();
     }
   });
 </script>
