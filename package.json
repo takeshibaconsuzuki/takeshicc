@@ -17,17 +17,48 @@
         "command": "takeshicc.helloWorld",
         "title": "Hello World",
         "category": "Takeshicc"
+      },
+      {
+        "command": "takeshicc.applyLayout",
+        "title": "Apply Layout",
+        "category": "Takeshicc"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Takeshicc",
+      "properties": {
+        "takeshicc.sidebarWidth": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "description": "Sidebar width in pixels. Written into the workspace state.vscdb when running 'Takeshicc: Apply Sidebar & Panel Widths'."
+        },
+        "takeshicc.panelWidth": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "description": "Panel width in pixels (used when the panel is docked left/right). Written into the workspace state.vscdb when running 'Takeshicc: Apply Sidebar & Panel Widths'."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "rebuild": "node scripts/rebuild.mjs",
+    "postinstall": "npm run rebuild",
+    "vsix": "vsce package"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
     "typescript": "^5.3.0"
   }
 }

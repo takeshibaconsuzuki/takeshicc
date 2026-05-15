@@ -2,3 +2,8 @@
 
 !package.json
 !out/**/*.js
+!node_modules/better-sqlite3/package.json
+!node_modules/better-sqlite3/lib/**
+!node_modules/better-sqlite3/build/Release/better_sqlite3.node
+!node_modules/bindings/**
+!node_modules/file-uri-to-path/**

@@ -24,6 +24,26 @@ npm run compile
   from the command palette
 - Entry point: `src\extension.ts` → `out\extension.js`
 
+## Native modules
+
+`better-sqlite3` is a native module and must match VS Code's Electron ABI
+(plain Node prebuilts will crash the Extension Host). `npm install` runs
+`scripts\rebuild.mjs` via `postinstall`, which:
+
+1. Looks for `code` (or `code.cmd` / `code.exe`) on `PATH`.
+2. Resolves symlinks, then walks parent dirs to find VS Code's bundled
+   `package.json` (handles macOS app bundles, Linux system installs, and
+   Windows hashed-subfolder layouts). Falls back to parsing the wrapper
+   script for an absolute resources path (covers `/usr/bin/code`).
+3. Reads `devDependencies.electron` from that file and hands the version
+   to `@electron/rebuild`.
+
+Override the detected version with `TAKESHICC_ELECTRON_VERSION=<x.y.z>`
+before running `npm install` / `npm run rebuild` — useful when `code` is
+not on `PATH` or you want to target a different VS Code than the one
+installed. Requires a native C/C++ toolchain (MSVC on Windows, Xcode CLT
+on macOS, `build-essential` on Linux).
+
 ## Packaging
 
 `.vscodeignore` is an allowlist: everything is excluded by default and
