@@ -10,13 +10,26 @@
     "Other"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "takeshicc.applyLayout",
         "title": "Apply Layout",
         "category": "Takeshicc"
+      },
+      {
+        "command": "takeshicc.pasteFileRef",
+        "title": "Paste File Reference into Terminal",
+        "category": "Takeshicc"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "takeshicc.pasteFileRef",
+        "key": "alt+k"
       }
     ],
     "configuration": {
