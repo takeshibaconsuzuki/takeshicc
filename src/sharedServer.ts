@@ -5,6 +5,9 @@
 // (detached, so it outlives this window); every window then holds an open
 // socket for its lifetime. If the server dies, the socket closes and we
 // transparently respawn/reconnect.
+//
+// After the `ready` handshake the server streams newline-delimited JSON
+// messages (idle/busy state); they are surfaced through `onState`.
 
 import * as net from 'net';
 import * as os from 'os';
@@ -15,6 +18,11 @@ import * as vscode from 'vscode';
 const CONNECT_TIMEOUT_MS = 8000;
 const RECONNECT_DELAY_MS = 500;
 const HANDSHAKE_TIMEOUT_MS = 1000;
+
+export interface StateMessage {
+  state: 'idle' | 'busy';
+  topic: string;
+}
 
 /** Stable, per-user, per-version address for the shared server. */
 function pipePathFor(version: string): string {
@@ -30,17 +38,22 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Connect to the shared server AND wait for its `ready` handshake. Resolving
- * on the raw TCP/pipe `connect` event is not enough: a connection can be
- * accepted by the OS into a server that exits a moment later. The server
- * sends `ready` only after it has incremented its refcount, so a socket that
- * delivers `ready` is backed by a server that cannot exit until we disconnect.
- * Anything short of that (reset, close, timeout) is treated as "no server".
+ * Connect, wait for the server's `ready` handshake, then keep streaming
+ * newline-delimited JSON messages to `onMessage`.
+ *
+ * Resolving on the raw `connect` event is not enough: a connection can be
+ * accepted by a server that exits a moment later. The server sends `ready`
+ * only after incrementing its refcount, so a socket that delivers `ready`
+ * is backed by a server that cannot exit until we disconnect.
  */
-function connectAndHandshake(pipePath: string): Promise<net.Socket> {
+function establish(
+  pipePath: string,
+  onMessage: (msg: unknown) => void,
+): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(pipePath);
     let settled = false;
+    let buffer = '';
 
     const fail = (err: Error) => {
       if (settled) {
@@ -52,22 +65,40 @@ function connectAndHandshake(pipePath: string): Promise<net.Socket> {
       reject(err);
     };
     const onClose = () => fail(new Error('closed before handshake'));
-    const timer = setTimeout(() => fail(new Error('handshake timed out')), HANDSHAKE_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => fail(new Error('handshake timed out')),
+      HANDSHAKE_TIMEOUT_MS,
+    );
 
+    socket.setEncoding('utf8');
     socket.once('error', fail);
     socket.once('close', onClose);
-    socket.once('data', (chunk: Buffer) => {
-      if (settled) {
-        return;
-      }
-      if (chunk.toString('utf8').startsWith('ready')) {
-        settled = true;
-        clearTimeout(timer);
-        socket.removeListener('error', fail);
-        socket.removeListener('close', onClose);
-        resolve(socket);
-      } else {
-        fail(new Error('unexpected handshake payload'));
+    socket.on('data', (chunk: string) => {
+      buffer += chunk;
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) {
+          continue;
+        }
+        if (!settled) {
+          if (line !== 'ready') {
+            fail(new Error(`unexpected handshake: ${line}`));
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          socket.removeListener('error', fail);
+          socket.removeListener('close', onClose);
+          resolve(socket);
+        } else {
+          try {
+            onMessage(JSON.parse(line));
+          } catch {
+            // Ignore a malformed line.
+          }
+        }
       }
     });
   });
@@ -77,6 +108,12 @@ export class SharedServerConnection {
   private socket: net.Socket | undefined;
   private disposed = false;
 
+  private readonly _onState = new vscode.EventEmitter<StateMessage>();
+  /** Fires whenever the server broadcasts a new idle/busy state. */
+  readonly onState = this._onState.event;
+  /** Most recent state, for consumers that attach after the fact. */
+  lastState: StateMessage = { state: 'idle', topic: '' };
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly log: vscode.OutputChannel,
@@ -84,6 +121,21 @@ export class SharedServerConnection {
 
   async start(): Promise<void> {
     await this.connect();
+  }
+
+  private handleMessage(msg: unknown): void {
+    if (
+      typeof msg === 'object' &&
+      msg !== null &&
+      (msg as { type?: unknown }).type === 'state'
+    ) {
+      const m = msg as { state?: unknown; topic?: unknown };
+      this.lastState = {
+        state: m.state === 'busy' ? 'busy' : 'idle',
+        topic: typeof m.topic === 'string' ? m.topic : '',
+      };
+      this._onState.fire(this.lastState);
+    }
   }
 
   /** Connect to the shared server, spawning one if none is running. */
@@ -96,7 +148,7 @@ export class SharedServerConnection {
     const pipePath = pipePathFor(version);
 
     try {
-      const socket = await this.connectOrSpawn(pipePath, version);
+      const socket = await this.connectOrSpawn(pipePath);
       if (this.disposed) {
         socket.destroy();
         return;
@@ -106,7 +158,6 @@ export class SharedServerConnection {
       socket.once('close', () => {
         this.socket = undefined;
         if (!this.disposed) {
-          // Server went away — respawn and reconnect.
           this.log.appendLine('Lost shared server; reconnecting...');
           setTimeout(() => void this.connect(), RECONNECT_DELAY_MS);
         }
@@ -119,10 +170,12 @@ export class SharedServerConnection {
     }
   }
 
-  private async connectOrSpawn(pipePath: string, version: string): Promise<net.Socket> {
+  private async connectOrSpawn(pipePath: string): Promise<net.Socket> {
+    const onMessage = (m: unknown) => this.handleMessage(m);
+
     // Fast path: a server is already running.
     try {
-      return await connectAndHandshake(pipePath);
+      return await establish(pipePath, onMessage);
     } catch {
       // None yet — spawn one below.
     }
@@ -137,7 +190,7 @@ export class SharedServerConnection {
     while (Date.now() < deadline) {
       await sleep(delay);
       try {
-        return await connectAndHandshake(pipePath);
+        return await establish(pipePath, onMessage);
       } catch {
         delay = Math.min(delay * 2, 500);
       }
@@ -172,8 +225,8 @@ export class SharedServerConnection {
    * parented under the WMI service host, outside our job, and survives.
    *
    * Layers, outermost first:
-   *  - powershell (short-lived, may be in our job — only needs to issue the
-   *    CIM call) delivered via -EncodedCommand to avoid all shell quoting.
+   *  - powershell (short-lived, only needs to issue the CIM call) delivered
+   *    via -EncodedCommand to avoid all shell quoting.
    *  - cmd.exe wrapper: injects ELECTRON_RUN_AS_NODE, which a WMI-created
    *    process does NOT inherit from us. cmd /s strips only the outer quotes.
    *  - Electron-as-Node running out/server.js.
@@ -209,5 +262,6 @@ export class SharedServerConnection {
     // its refcount immediately.
     this.socket?.end();
     this.socket = undefined;
+    this._onState.dispose();
   }
 }
