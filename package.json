@@ -14,11 +14,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "takeshicc.helloWorld",
-        "title": "Hello World",
-        "category": "Takeshicc"
-      },
-      {
         "command": "takeshicc.applyLayout",
         "title": "Apply Layout",
         "category": "Takeshicc"

@@ -20,13 +20,12 @@ npm run compile
 ## Develop
 
 - `npm run watch` — incremental TypeScript build
-- `F5` — launches Extension Development Host; run `Takeshicc: Hello World`
-  from the command palette
+- `F5` — launches Extension Development Host
 - Entry point: `src\extension.ts` → `out\extension.js`
 
 ## Native modules
 
-`better-sqlite3` is a native module and must match VS Code's Electron ABI
+Native modules must match VS Code's Electron ABI
 (plain Node prebuilts will crash the Extension Host). `npm install` runs
 `scripts\rebuild.mjs` via `postinstall`, which:
 
