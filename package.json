@@ -30,6 +30,10 @@
       {
         "command": "takeshicc.pasteFileRef",
         "key": "alt+k"
+      },
+      {
+        "command": "workbench.action.toggleMaximizedPanel",
+        "key": "ctrl+`"
       }
     ],
     "configuration": {
