@@ -28,6 +28,11 @@
         "command": "takeshicc.pasteFileRef",
         "title": "Paste File Reference into Terminal",
         "category": "Takeshicc"
+      },
+      {
+        "command": "takeshicc.openConfig",
+        "title": "Open Config File",
+        "category": "Takeshicc"
       }
     ],
     "keybindings": [

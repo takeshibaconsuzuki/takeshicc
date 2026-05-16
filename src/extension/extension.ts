@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { applyLayout } from './applyLayout';
+import { openConfig } from './config';
 import { registerPasteFileRef } from './pasteFileRef';
 import { getOrCreateServer, ServerClient } from './getOrCreateServer';
 
@@ -7,7 +8,8 @@ let serverClient: ServerClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
-    vscode.commands.registerCommand('takeshicc.applyLayout', () => applyLayout(context))
+    vscode.commands.registerCommand('takeshicc.applyLayout', () => applyLayout(context)),
+    vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig())
   );
   registerPasteFileRef(context);
 
