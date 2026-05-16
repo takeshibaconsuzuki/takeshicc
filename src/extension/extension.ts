@@ -110,7 +110,12 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
     const hist = latestHistorical.find((x) => x.chatId === chatId);
-    addOptimistic(chatId, terminal, hist?.summary ?? '', hist?.mTime ?? Date.now());
+    addOptimistic(
+      chatId,
+      terminal,
+      hist?.summary ?? '',
+      hist?.mTime ?? Date.now(),
+    );
     log.appendLine(
       `Takeshicc: observed 'claude --resume ${chatId}' — ` +
         `tracking it optimistically as a live chat.`,

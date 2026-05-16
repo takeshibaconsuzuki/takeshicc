@@ -7,11 +7,17 @@ $ZipName = "$BaseName.zip"
 $Url = "https://nodejs.org/dist/$NodeVersion/$ZipName"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$NodeDir = Join-Path $Root ".node"
+$NodeDir = Join-Path $Root ".node.win"
 
-if (Test-Path (Join-Path $NodeDir "node.exe")) {
-    Write-Host "Node already installed at $NodeDir"
-    exit 0
+$NodeExe = Join-Path $NodeDir "node.exe"
+if (Test-Path $NodeExe) {
+    $Installed = (& $NodeExe --version 2>$null)
+    if ($Installed -eq $NodeVersion) {
+        Write-Host "Node $NodeVersion already installed at $NodeDir"
+        exit 0
+    }
+    Write-Host "Replacing Node $Installed with $NodeVersion ..."
+    Remove-Item $NodeDir -Recurse -Force
 }
 
 New-Item -ItemType Directory -Force -Path $NodeDir | Out-Null
@@ -32,4 +38,4 @@ Remove-Item $Staging -Recurse -Force
 Remove-Item $ZipPath -Force
 
 Write-Host "Node $NodeVersion installed to $NodeDir"
-Write-Host "Use: .\.node\node.exe and .\.node\npm.cmd"
+Write-Host "Use: .\.node.win\node.exe and .\.node.win\npm.cmd"

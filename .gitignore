@@ -1,6 +1,6 @@
 *.vsix
-.node/
-node_modules/
+.node*/
+node_modules*/
 
 /.claude/settings.local.json
 /out/

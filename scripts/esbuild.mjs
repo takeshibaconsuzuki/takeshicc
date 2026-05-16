@@ -10,8 +10,15 @@
 // and emits in one step. There is no separate `typecheck` script.
 
 import * as fs from 'fs';
-import * as esbuild from 'esbuild';
-import { typecheckPlugin } from '@jgoz/esbuild-plugin-typecheck';
+
+// Repoint node_modules at this platform's slot BEFORE importing esbuild —
+// esbuild resolves a native binary on import and aborts on a platform
+// mismatch. This side-effect import runs to completion first; esbuild and the
+// typecheck plugin are then imported dynamically so they resolve afterwards.
+import './link-modules.mjs';
+
+const esbuild = await import('esbuild');
+const { typecheckPlugin } = await import('@jgoz/esbuild-plugin-typecheck');
 
 const shared = {
   platform: 'node',

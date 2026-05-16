@@ -470,7 +470,9 @@ async function resolveConfiguredPort(
 ): Promise<number | undefined> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
+    vscode.window.showInformationMessage(
+      'Takeshicc: no workspace folder open.',
+    );
     return undefined;
   }
 

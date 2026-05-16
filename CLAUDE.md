@@ -4,15 +4,35 @@ Bare-bones VS Code extension.
 
 ## Environment
 
-Node is workspace-scoped at `.\.node\node.exe` (downloaded by
-`scripts\setup-node.ps1`). `.vscode\settings.json` prepends `.node\` to
-`PATH` for every integrated terminal, so `npm` and the build commands
-just work — no manual PATH setup needed when running in a VS Code terminal.
+Node is workspace-scoped. Install it with `scripts\setup-node.ps1` on
+Windows (into `.node.win\`, binary at `.node.win\node.exe`) or
+`scripts/setup-node.sh` on macOS/Linux (into `.node.posix/`, binary at
+`.node.posix/bin/node`) — separate directories so a shared checkout can hold
+both. Re-running either script after bumping the pinned version replaces the
+existing install in place. `.vscode\settings.json` prepends the right
+directory (`.node.win\` on Windows, `.node.posix/bin` on macOS/Linux) to
+`PATH` for every integrated terminal, so `npm` and the build commands just
+work — no manual PATH setup needed when running in a VS Code terminal.
+
+## node_modules (per-platform)
+
+`node_modules` holds platform-specific native binaries — esbuild's prebuilt
+binary and `better-sqlite3`'s compiled, Electron-ABI-rebuilt addon — so it
+**cannot** be shared between Windows and macOS/Linux. Like Node itself, the
+install is kept per-platform. `node_modules` is always a real directory (npm
+will not install into a symlinked one) holding the running OS's install; the
+inactive OS's tree is parked alongside in `node_modules.win\` or
+`node_modules.posix/`. `scripts\link-modules.mjs` swaps these trees so
+`node_modules` always matches the current OS (renames within one filesystem,
+so it is instant). It runs automatically as npm's `preinstall` hook and again
+at the top of `scripts\esbuild.mjs`, so switching OS needs no manual step. Run
+`npm install` once per platform to populate that platform's tree — re-run only
+when dependencies change.
 
 ## First-time setup
 
 ```powershell
-.\scripts\setup-node.ps1
+.\scripts\setup-node.ps1   # Windows; macOS/Linux: ./scripts/setup-node.sh
 npm install
 npm run build:all
 ```

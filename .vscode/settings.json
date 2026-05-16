@@ -1,5 +1,11 @@
 {
   "terminal.integrated.env.windows": {
-    "PATH": "${workspaceFolder}\\.node;${env:PATH}"
+    "PATH": "${workspaceFolder}\\.node.win;${env:PATH}"
+  },
+  "terminal.integrated.env.osx": {
+    "PATH": "${workspaceFolder}/.node.posix/bin:${env:PATH}"
+  },
+  "terminal.integrated.env.linux": {
+    "PATH": "${workspaceFolder}/.node.posix/bin:${env:PATH}"
   }
 }

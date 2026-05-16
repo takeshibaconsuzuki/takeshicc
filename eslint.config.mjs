@@ -6,7 +6,7 @@ import globals from 'globals';
 export default tseslint.config(
   // Nothing here is hand-written source — skip build output, deps and bundles.
   {
-    ignores: ['out/', 'node_modules/', '.node/', '.vscode-test/', '*.vsix'],
+    ignores: ['out/', 'node_modules*/', '.node*/', '.vscode-test/', '*.vsix'],
   },
 
   // TypeScript sources: extension host + standalone server.
