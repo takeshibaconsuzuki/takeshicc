@@ -12,6 +12,9 @@ export const ROUTES = {
   // Server-Sent Events stream: pushes the full LiveChatMetadata[] snapshot on
   // connect and again on every change to the live set.
   subscribeLiveChats: '/subscribe-live-chats',
+  // Synchronous read of past (non-live) chats for a given worktree. Takes a
+  // `?dir=` query param and returns HistoricalChatMetadata[].
+  getHistoricalChats: '/get-historical-chats',
 } as const;
 
 // A Claude Code chat's run state, derived from its hook events.
@@ -36,6 +39,21 @@ export interface LiveChatMetadata {
   // the Claude Agent SDK's getSessionInfo; absent until the first lookup for
   // this chat resolves (a brand-new session has no extractable summary yet).
   summary?: string;
+}
+
+// One past Claude Code chat — the element type returned by
+// GET /get-historical-chats. These are sessions that exist on disk but are not
+// in the live set: finished chats the user can resume. Sourced from the Claude
+// Agent SDK's listSessions, scoped to a single git worktree (the request's
+// `dir`, with the SDK's includeWorktrees flag off so sibling worktrees of the
+// same repo are excluded).
+export interface HistoricalChatMetadata {
+  chatId: string;
+  // Display label — the session's custom title, else its auto-generated
+  // summary, else its first prompt. Same precedence as LiveChatMetadata.summary
+  // and Claude Code's own resume picker.
+  summary: string;
+  mTime: number; // epoch ms of the session's last modification
 }
 
 // The subset of a Claude Code hook event payload the server relies on. Hooks

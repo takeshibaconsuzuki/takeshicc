@@ -11,7 +11,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
-import { HOST, LiveChatMetadata, ROUTES } from '../server/protocol';
+import {
+  HistoricalChatMetadata,
+  HOST,
+  LiveChatMetadata,
+  ROUTES,
+} from '../server/protocol';
 import { CONFIG_PATH, lookupGroup, ResolvedGroup } from './config';
 import { resolveGitGroup } from './gitGroup';
 import { registerHooks } from './registerHooks';
@@ -28,6 +33,9 @@ export interface ServerClient {
   // stream. onUpdate fires with the full snapshot on connect and on every
   // change; the stream reconnects on its own and is torn down by close().
   subscribeLiveChats(onUpdate: (chats: LiveChatMetadata[]) => void): void;
+  // Fetch the past (non-live) chats for `dir` — a one-shot read of
+  // GET /get-historical-chats. Rejects on any transport or server error.
+  getHistoricalChats(dir: string): Promise<HistoricalChatMetadata[]>;
   close(): void;
 }
 
@@ -313,6 +321,28 @@ function makeClient(
     subscribeLiveChats(onUpdate) {
       sse?.close(); // a second call replaces the prior subscription
       sse = streamLiveChats(port, onUpdate, log);
+    },
+    getHistoricalChats(dir) {
+      return new Promise<HistoricalChatMetadata[]>((resolve, reject) => {
+        const path = `${ROUTES.getHistoricalChats}?dir=${encodeURIComponent(dir)}`;
+        const req = http.get({ host: HOST, port, path, agent }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            if (res.statusCode !== 200) {
+              reject(new Error(`status ${res.statusCode}: ${text}`));
+              return;
+            }
+            try {
+              resolve(JSON.parse(text) as HistoricalChatMetadata[]);
+            } catch {
+              reject(new Error('unparseable /get-historical-chats body'));
+            }
+          });
+        });
+        req.on('error', reject);
+      });
     },
     close() {
       clearInterval(timer);

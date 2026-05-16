@@ -6,9 +6,10 @@
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
 import express from 'express';
-import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
+import { getSessionInfo, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import {
   HOST,
+  HistoricalChatMetadata,
   HOOK_EFFECTS,
   HookEffect,
   LiveChatMetadata,
@@ -16,6 +17,10 @@ import {
 } from './protocol';
 
 const IDLE_CHECK_MS = 5_000;
+
+// Cap on how many past chats GET /get-historical-chats returns — listSessions
+// is sorted newest-first, so this keeps the most recent ones.
+const HISTORICAL_LIMIT = 100;
 
 // Timestamped line to stdout — captured into ~/.takeshicc/server-<port>.log.
 function log(msg: string): void {
@@ -237,6 +242,34 @@ app.post(ROUTES.updateChatState, (req, res) => {
 // stream below is the push equivalent; this remains as a one-shot/debug read.
 app.get(ROUTES.getLiveChats, (_req, res) => {
   res.status(200).json(chatSnapshot());
+});
+
+// /get-historical-chats — past (non-live) chats for one worktree. The `?dir=`
+// query param is the worktree directory; listSessions is scoped to it with
+// includeWorktrees off, so sibling worktrees of the same repo are excluded.
+// Chats currently in the live set still appear here (the session JSONL exists
+// on disk) — the extension filters those out so each chat shows in one section.
+app.get(ROUTES.getHistoricalChats, (req, res) => {
+  const dir = typeof req.query.dir === 'string' ? req.query.dir : undefined;
+  if (!dir) {
+    res.status(400).json({ error: 'expected ?dir=<worktree directory>' });
+    return;
+  }
+  void listSessions({ dir, includeWorktrees: false, limit: HISTORICAL_LIMIT })
+    .then((sessions) => {
+      const historical: HistoricalChatMetadata[] = sessions.map((s) => ({
+        chatId: s.sessionId,
+        summary: s.summary,
+        mTime: s.lastModified,
+      }));
+      log(`GET ${ROUTES.getHistoricalChats} (${dir}) -> ${historical.length}`);
+      res.status(200).json(historical);
+    })
+    .catch((err) => {
+      const message = (err as Error).message;
+      log(`GET ${ROUTES.getHistoricalChats} failed — ${message}`);
+      res.status(500).json({ error: message });
+    });
 });
 
 // /subscribe-live-chats — Server-Sent Events stream of live-chat snapshots.

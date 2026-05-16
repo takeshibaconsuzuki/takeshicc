@@ -111,6 +111,16 @@ export class TerminalTracker implements vscode.Disposable {
     }
   }
 
+  // Bind a chat to a terminal explicitly, bypassing ancestor-PID matching.
+  // Used when the extension itself spawned the terminal — resuming a historical
+  // chat — and so already knows the pairing rather than discovering it from
+  // reported PIDs. The binding is reconciled like any other (see ingestNow): it
+  // survives until the chat leaves the live set or the terminal closes. The
+  // caller refreshes the view; this does not fire onDidChange.
+  bind(chatId: string, terminal: vscode.Terminal): void {
+    this.bindings.set(chatId, terminal);
+  }
+
   // chatIds that can be revealed — i.e. bound to a terminal in this window.
   revealableChatIds(): Set<string> {
     return new Set(this.bindings.keys());

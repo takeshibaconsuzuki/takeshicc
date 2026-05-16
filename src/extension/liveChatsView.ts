@@ -9,7 +9,7 @@
 // webview side needs no change.
 
 import * as vscode from 'vscode';
-import { LiveChatMetadata } from '../server/protocol';
+import { HistoricalChatMetadata, LiveChatMetadata } from '../server/protocol';
 
 // Connection status the view renders around the chat list.
 //   'connecting' — server resolution still in flight (initial state)
@@ -19,14 +19,18 @@ import { LiveChatMetadata } from '../server/protocol';
 type ViewStatus = 'connecting' | 'off' | 'ready' | 'error';
 
 // The ext -> webview message contract. The webview replies with a single
-// { type: 'ready' } once its script has loaded and can receive state, and a
-// { type: 'reveal', chatId } when a revealable row is clicked.
+// { type: 'ready' } once its script has loaded and can receive state, a
+// { type: 'reveal', chatId } when a revealable live-chat row is clicked, and a
+// { type: 'resume', chatId } when a historical-chat row is clicked.
 interface ViewState {
   status: ViewStatus;
   chats: LiveChatMetadata[];
   // chatIds the extension can reveal — bound to a terminal in this window.
   // Rows in this set render as clickable; clicking focuses their terminal.
   revealable: string[];
+  // Past (non-live) chats for this worktree. Every row is clickable; clicking
+  // resumes the chat in a new terminal.
+  historical: HistoricalChatMetadata[];
   detail?: string;
 }
 
@@ -42,13 +46,22 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     status: 'connecting',
     chats: [],
     revealable: [],
+    historical: [],
   };
 
   // log: diagnostics channel. onReveal: invoked with the chatId of a clicked
-  // revealable row, so the extension can focus that chat's terminal.
+  // revealable live-chat row, so the extension can focus that chat's terminal.
+  // onResume: invoked with the chatId, display label and mtime of a clicked
+  // historical-chat row, so the extension can spawn a terminal that resumes it
+  // and render it identically while it is optimistically live.
   constructor(
     private readonly log: vscode.OutputChannel,
     private readonly onReveal: (chatId: string) => void,
+    private readonly onResume: (
+      chatId: string,
+      summary: string,
+      mTime: number,
+    ) => void,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -57,13 +70,24 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.html();
 
     view.webview.onDidReceiveMessage(
-      (msg: { type?: string; chatId?: string }) => {
+      (msg: {
+        type?: string;
+        chatId?: string;
+        summary?: string;
+        mTime?: number;
+      }) => {
         // The webview signals it is ready to receive state; reply with
         // whatever we have (it may have arrived before the view resolved).
         if (msg?.type === 'ready') {
           this.post();
         } else if (msg?.type === 'reveal' && typeof msg.chatId === 'string') {
           this.onReveal(msg.chatId);
+        } else if (msg?.type === 'resume' && typeof msg.chatId === 'string') {
+          this.onResume(
+            msg.chatId,
+            typeof msg.summary === 'string' ? msg.summary : '',
+            typeof msg.mTime === 'number' ? msg.mTime : Date.now(),
+          );
         }
       },
     );
@@ -75,23 +99,39 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  // Push a fresh chat snapshot plus the set of chatIds that can be revealed.
-  update(chats: LiveChatMetadata[], revealable: Set<string>): void {
-    this.state = { status: 'ready', chats, revealable: [...revealable] };
+  // Push a fresh chat snapshot: the live chats, the set of chatIds that can be
+  // revealed, and the historical (past, non-live) chats for this worktree.
+  update(
+    chats: LiveChatMetadata[],
+    revealable: Set<string>,
+    historical: HistoricalChatMetadata[],
+  ): void {
+    this.state = {
+      status: 'ready',
+      chats,
+      revealable: [...revealable],
+      historical,
+    };
     this.post();
   }
 
   // The server feature is disabled for this workspace (no config entry, not a
   // repo, etc.) — there is nothing to show.
   setOff(): void {
-    this.state = { status: 'off', chats: [], revealable: [] };
+    this.state = { status: 'off', chats: [], revealable: [], historical: [] };
     this.post();
   }
 
   // Connected, but the chat snapshot could not be fetched.
   setError(detail: string): void {
     this.log.appendLine(`Takeshicc: live chats unavailable — ${detail}`);
-    this.state = { status: 'error', chats: [], revealable: [], detail };
+    this.state = {
+      status: 'error',
+      chats: [],
+      revealable: [],
+      historical: [],
+      detail,
+    };
     this.post();
   }
 
@@ -122,22 +162,29 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
   }
-  #header {
+  .section-header {
     padding: 6px 12px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.9em;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
+  /* The Historical section sits below the Live one; a top border and extra
+     space mark the divide. Hidden outright until there is something to show. */
+  #hist-header {
+    margin-top: 6px;
+    border-top: 1px solid var(--vscode-panel-border, transparent);
+    padding-top: 12px;
+  }
   .empty {
     padding: 10px 12px;
     color: var(--vscode-descriptionForeground);
     line-height: 1.4;
   }
-  /* The chat list is a 3-column grid: state, title, mtime. Each row is a
-     subgrid spanning all three columns so cells line up across rows while the
-     row stays a single hover/click target. */
-  #root {
+  /* A chat list is a 3-column grid: state, title, mtime. Each row is a subgrid
+     spanning all three columns so cells line up across rows while the row
+     stays a single hover/click target. */
+  .chat-grid {
     display: grid;
     grid-template-columns: auto 1fr auto;
   }
@@ -170,6 +217,12 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     border-top-color: transparent;
     animation: spin 0.8s linear infinite;
   }
+  /* Historical chats are not live — a hollow, dimmed dot, no colour. */
+  .dot.historical {
+    background: none;
+    box-sizing: border-box;
+    border: 1px solid var(--vscode-descriptionForeground);
+  }
   @keyframes spin {
     to {
       transform: rotate(360deg);
@@ -189,12 +242,16 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 <body>
-<div id="header"></div>
-<div id="root"></div>
+<div id="live-header" class="section-header"></div>
+<div id="live-root" class="chat-grid"></div>
+<div id="hist-header" class="section-header"></div>
+<div id="hist-root" class="chat-grid"></div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
-  const root = document.getElementById('root');
-  const header = document.getElementById('header');
+  const liveRoot = document.getElementById('live-root');
+  const liveHeader = document.getElementById('live-header');
+  const histRoot = document.getElementById('hist-root');
+  const histHeader = document.getElementById('hist-header');
 
   function relTime(ms) {
     const delta = Date.now() - ms;
@@ -255,22 +312,60 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     return row;
   }
 
-  function render(state) {
-    root.replaceChildren();
-    header.textContent = '';
+  // A historical-chat row. Always clickable — clicking resumes the chat in a
+  // new terminal. Column 1 is a dimmed, hollow dot (the chat is not live).
+  function histEl(chat) {
+    const row = document.createElement('div');
+    row.className = 'row revealable';
+
+    const labelText = chat.summary || chat.chatId;
+    const tip = chat.summary
+      ? chat.summary + '\\n' + chat.chatId
+      : chat.chatId;
+    row.title = 'Click to resume this chat in a new terminal\\n' + tip;
+    row.addEventListener('click', function () {
+      vscode.postMessage({
+        type: 'resume',
+        chatId: chat.chatId,
+        summary: chat.summary,
+        mTime: chat.mTime,
+      });
+    });
+
+    const dot = document.createElement('span');
+    dot.className = 'dot historical';
+    row.appendChild(dot);
+
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = labelText;
+    row.appendChild(title);
+
+    const mtime = document.createElement('span');
+    mtime.className = 'mtime';
+    mtime.textContent = relTime(chat.mTime);
+    row.appendChild(mtime);
+
+    return row;
+  }
+
+  // Render the Live Chats section. Returns nothing — fills liveHeader/liveRoot.
+  function renderLive(state) {
+    liveRoot.replaceChildren();
+    liveHeader.textContent = '';
 
     if (state.status === 'connecting') {
-      root.appendChild(emptyEl('Connecting to the server\\u2026'));
+      liveRoot.appendChild(emptyEl('Connecting to the server\\u2026'));
       return;
     }
     if (state.status === 'off') {
-      root.appendChild(
+      liveRoot.appendChild(
         emptyEl('Server feature is off for this workspace.')
       );
       return;
     }
     if (state.status === 'error') {
-      root.appendChild(
+      liveRoot.appendChild(
         emptyEl(
           'Could not reach the server.' +
             (state.detail ? ' ' + state.detail : '')
@@ -281,15 +376,46 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
 
     const chats = (state.chats || []).slice().sort((a, b) => b.mTime - a.mTime);
     if (chats.length === 0) {
-      root.appendChild(emptyEl('No live chats.'));
+      liveRoot.appendChild(emptyEl('No live chats.'));
       return;
     }
     const revealable = new Set(state.revealable || []);
-    header.textContent =
+    liveHeader.textContent =
       chats.length + (chats.length === 1 ? ' live chat' : ' live chats');
     for (const chat of chats) {
-      root.appendChild(chatEl(chat, revealable.has(chat.chatId)));
+      liveRoot.appendChild(chatEl(chat, revealable.has(chat.chatId)));
     }
+  }
+
+  // Render the Historical Chats section. Shown only once connected; hidden
+  // outright (header and all) for the connecting/off/error states.
+  function renderHistorical(state) {
+    histRoot.replaceChildren();
+    histHeader.textContent = '';
+
+    if (state.status !== 'ready') {
+      histHeader.style.display = 'none';
+      return;
+    }
+    histHeader.style.display = '';
+
+    const chats =
+      (state.historical || []).slice().sort((a, b) => b.mTime - a.mTime);
+    if (chats.length === 0) {
+      histRoot.appendChild(emptyEl('No historical chats.'));
+      return;
+    }
+    histHeader.textContent =
+      chats.length +
+      (chats.length === 1 ? ' historical chat' : ' historical chats');
+    for (const chat of chats) {
+      histRoot.appendChild(histEl(chat));
+    }
+  }
+
+  function render(state) {
+    renderLive(state);
+    renderHistorical(state);
   }
 
   window.addEventListener('message', (event) => {
