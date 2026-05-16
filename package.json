@@ -24,11 +24,6 @@
         "command": "takeshicc.pasteFileRef",
         "title": "Paste File Reference into Terminal",
         "category": "Takeshicc"
-      },
-      {
-        "command": "takeshicc.showStatus",
-        "title": "Show Claude Status",
-        "category": "Takeshicc"
       }
     ],
     "keybindings": [
