@@ -2,10 +2,14 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "npm: compile",
+      "label": "npm: build:all",
       "type": "shell",
       "command": "npm",
-      "args": ["run", "compile"],
+      "args": ["run", "build:all"],
+      // NO_COLOR makes @jgoz/esbuild-plugin-typecheck emit ts.formatDiagnostics
+      // output (the classic `file(line,col): error TSxxxx:` format) instead of
+      // ANSI-colored pretty output, so the $tsc problem matcher can parse it.
+      "options": { "env": { "NO_COLOR": "1" } },
       "problemMatcher": "$tsc",
       "group": { "kind": "build", "isDefault": true }
     }

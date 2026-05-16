@@ -3,6 +3,10 @@
   "displayName": "takeshicc",
   "description": "",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/takeshibaconsuzuki/takeshicc.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -55,22 +59,30 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run build:all",
+    "build:ext": "node scripts/esbuild.mjs ext",
+    "build:server": "node scripts/esbuild.mjs server",
+    "build:all": "node scripts/esbuild.mjs all",
+    "watch:ext": "node scripts/esbuild.mjs ext --watch",
+    "watch:server": "node scripts/esbuild.mjs server --watch",
     "rebuild": "node scripts/rebuild.mjs",
     "postinstall": "npm run rebuild",
-    "vsix": "vsce package"
+    "vsix": "vsce package --skip-license"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.0",
+    "@jgoz/esbuild-plugin-typecheck": "^4.0.1",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^4.17.21",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.0",
-    "typescript": "^5.3.0"
+    "esbuild": "^0.25.0",
+    "express": "^4.21.2",
+    "typescript": "^5.3.0",
+    "zod": "^3.24.1"
   }
 }

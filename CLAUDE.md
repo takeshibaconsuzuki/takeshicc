@@ -6,7 +6,7 @@ Bare-bones VS Code extension.
 
 Node is workspace-scoped at `.\.node\node.exe` (downloaded by
 `scripts\setup-node.ps1`). `.vscode\settings.json` prepends `.node\` to
-`PATH` for every integrated terminal, so `npm`, `tsc`, and the build task
+`PATH` for every integrated terminal, so `npm` and the build commands
 just work — no manual PATH setup needed when running in a VS Code terminal.
 
 ## First-time setup
@@ -14,34 +14,42 @@ just work — no manual PATH setup needed when running in a VS Code terminal.
 ```powershell
 .\scripts\setup-node.ps1
 npm install
-npm run compile
+npm run build:all
 ```
 
 ## Develop
 
-- `npm run watch` — incremental TypeScript build
-- `F5` — launches Extension Development Host
-- Entry point: `src\extension.ts` → `out\extension.js`
+- `F5` — launches the Extension Development Host (runs the `build:all` task first)
+- `npm run watch:ext` / `npm run watch:server` — incremental rebuilds in watch mode
+- Entry points: `src\extension\extension.ts` → `out\extension.js` and
+  `src\server\server.ts` → `out\server.js`
+
+## Source layout
+
+- `src\extension\` — runs in the VS Code extension host; may `import 'vscode'`.
+- `src\server\` — a standalone Node process; must **never** `import 'vscode'`.
+- `src\server\protocol.ts` — the vscode-free wire contract shared by both sides.
+
+The extension talks to a per-repository local HTTP server, spawned on demand
+and shared across windows. The repo→port mapping is a user-maintained file at
+`~\.takeshicc\config.json`; without an entry the server feature stays off.
+
+## Build
+
+esbuild (`scripts\esbuild.mjs`) bundles two self-contained CJS outputs:
+`out\extension.js` and `out\server.js`. Type-checking is integrated into the
+build via `@jgoz/esbuild-plugin-typecheck` (runs `tsc` in a worker) — there is
+no separate typecheck step, and `tsconfig.json` sets `noEmit`. `npm run
+build:all` builds both bundles; `build:ext` / `build:server` build one.
 
 ## Native modules
 
-Native modules must match VS Code's Electron ABI
-(plain Node prebuilts will crash the Extension Host). `npm install` runs
-`scripts\rebuild.mjs` via `postinstall`, which:
-
-1. Looks for `code` (or `code.cmd` / `code.exe`) on `PATH`.
-2. Resolves symlinks, then walks parent dirs to find VS Code's bundled
-   `package.json` (handles macOS app bundles, Linux system installs, and
-   Windows hashed-subfolder layouts). Falls back to parsing the wrapper
-   script for an absolute resources path (covers `/usr/bin/code`).
-3. Reads `devDependencies.electron` from that file and hands the version
-   to `@electron/rebuild`.
-
-Override the detected version with `TAKESHICC_ELECTRON_VERSION=<x.y.z>`
-before running `npm install` / `npm run rebuild` — useful when `code` is
-not on `PATH` or you want to target a different VS Code than the one
-installed. Requires a native C/C++ toolchain (MSVC on Windows, Xcode CLT
-on macOS, `build-essential` on Linux).
+Native modules (`better-sqlite3`) must match VS Code's Electron ABI — plain
+Node prebuilts crash the Extension Host. `npm install`'s `postinstall` runs
+`scripts\rebuild.mjs`, which detects the installed VS Code's Electron version
+and rebuilds against it. Override detection with
+`TAKESHICC_ELECTRON_VERSION=<x.y.z>` (useful when `code` isn't on `PATH`).
+Requires a native C/C++ toolchain — MSVC / Xcode CLT / `build-essential`.
 
 ## Packaging
 
