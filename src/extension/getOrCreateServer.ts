@@ -14,6 +14,7 @@ import * as vscode from 'vscode';
 import { HOST, ROUTES } from '../server/protocol';
 import { CONFIG_PATH, lookupGroup, ResolvedGroup } from './config';
 import { resolveGitGroup } from './gitGroup';
+import { registerHooks } from './registerHooks';
 
 const WHOAMI_TIMEOUT_MS = 1_000;
 const POLL_INITIAL_MS = 50;
@@ -242,6 +243,14 @@ export async function getOrCreateServer(
   const version: string = context.extension.packageJSON.version ?? '0';
   const serverJs = context.asAbsolutePath('out/server.js');
 
+  // Connecting also registers the server as a Claude Code HTTP hook for this
+  // workspace. registerHooks is fire-and-forget — it must never block or fail
+  // the connect, so it is not awaited and swallows its own errors.
+  const connect = (): ServerClient => {
+    void registerHooks(folder.uri.fsPath, port, log);
+    return makeClient(port, groupKey, idleTimeoutMs, log);
+  };
+
   // Loop forever; each iteration surfaces its own error notification, and the
   // ~8 s poll deadline paces them.
   for (;;) {
@@ -256,7 +265,7 @@ export async function getOrCreateServer(
           );
         }
         log.appendLine(`Takeshicc: connected to server on port ${port}.`);
-        return makeClient(port, groupKey, idleTimeoutMs, log);
+        return connect();
       }
       // Port owned by an unrelated process — config error: do not spawn, do
       // not loop.

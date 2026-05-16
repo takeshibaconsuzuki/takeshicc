@@ -6,7 +6,7 @@
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
 import express = require('express');
-import { HOST, ROUTES } from './protocol';
+import { HOST, HOOK_EFFECTS, HookEffect, LiveChatMetadata, ROUTES } from './protocol';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -40,6 +40,10 @@ if (
 
 let lastActivityAt = Date.now();
 
+// chatId -> live chat metadata. In-memory only: lost on idle-exit, which is
+// fine — Claude Code's hooks re-report each chat's state on its next event.
+const liveChats = new Map<string, LiveChatMetadata>();
+
 const app = express();
 
 // Mark activity on every request so the idle check can never exit under load.
@@ -47,6 +51,9 @@ app.use((_req, _res, next) => {
   lastActivityAt = Date.now();
   next();
 });
+
+// Parse JSON bodies for the hook endpoint (Claude Code POSTs a JSON payload).
+app.use(express.json());
 
 app.get(ROUTES.whoami, (req, res) => {
   // /whoami is a client's connect handshake — one per window activation.
@@ -57,6 +64,52 @@ app.get(ROUTES.whoami, (req, res) => {
 app.get(ROUTES.ping, (_req, res) => {
   // Heartbeat — fires every idleTimeoutMs/3, so it is intentionally not logged.
   res.status(200).send('ok');
+});
+
+// /update-chat-state — a Claude Code HTTP hook target. The POST body is the
+// hook event payload; session_id is the chat id and hook_event_name selects
+// the effect on that chat (see HOOK_EFFECTS).
+app.post(ROUTES.updateChatState, (req, res) => {
+  const body = req.body as { session_id?: unknown; hook_event_name?: unknown };
+  const chatId = body?.session_id;
+  const eventName = body?.hook_event_name;
+  if (typeof chatId !== 'string' || !chatId || typeof eventName !== 'string') {
+    res.status(400).json({ error: 'expected { session_id, hook_event_name }' });
+    return;
+  }
+
+  const existing = liveChats.get(chatId);
+  const now = Date.now();
+
+  // An unrecognized event means a hook fired, so the chat is doing something —
+  // 'busy' is the safe fallback.
+  const effect: HookEffect = HOOK_EFFECTS[eventName] ?? 'busy';
+
+  if (effect === 'end') {
+    liveChats.delete(chatId);
+    log(`chat ${chatId}: ${eventName} -> ended`);
+  } else if (effect === 'keep') {
+    // A 'keep' event carries no run-state signal. For a tracked chat it just
+    // refreshes liveness; for an untracked one there is no state to keep, so
+    // ignore it rather than invent one — wait for an event that says idle/busy.
+    if (!existing) {
+      log(`chat ${chatId}: ${eventName} -> ignored (untracked)`);
+      res.status(200).end();
+      return;
+    }
+    liveChats.set(chatId, { chatId, state: existing.state, mTime: now });
+    log(`chat ${chatId}: ${eventName} -> kept (${existing.state})`);
+  } else {
+    liveChats.set(chatId, { chatId, state: effect, mTime: now });
+    log(`chat ${chatId}: ${eventName} -> ${effect}`);
+  }
+  res.status(200).end();
+});
+
+// /get-live-chats — current snapshot of every tracked chat.
+app.get(ROUTES.getLiveChats, (_req, res) => {
+  const chats: LiveChatMetadata[] = [...liveChats.values()];
+  res.status(200).json(chats);
 });
 
 app.use((req, res) => {
