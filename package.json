@@ -38,6 +38,11 @@
         "command": "takeshicc.openServerLog",
         "title": "Open Server Log",
         "category": "Takeshicc"
+      },
+      {
+        "command": "takeshicc.copyServerKillCommand",
+        "title": "Copy Server Kill Command",
+        "category": "Takeshicc"
       }
     ],
     "keybindings": [

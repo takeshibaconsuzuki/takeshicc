@@ -460,23 +460,26 @@ export async function getOrCreateServer(
   }
 }
 
-// Command handler: opens the per-port server log for the current workspace's
-// configured group, or explains why there is none.
-export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
+// Resolves the configured server port for the current workspace's git group:
+// folder -> groupKey -> config group -> port. Surfaces a user-facing
+// notification on every failure path and returns undefined — there is simply
+// no server configured for this repo. Shared by the openServerLog and
+// copyServerKillCommand handlers, which both need exactly this resolution.
+async function resolveConfiguredPort(
+  log: vscode.OutputChannel,
+): Promise<number | undefined> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showInformationMessage(
-      'Takeshicc: no workspace folder open.',
-    );
-    return;
+    vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
+    return undefined;
   }
 
   const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
   if (!groupKey) {
     vscode.window.showInformationMessage(
-      'Takeshicc: workspace is not a git repository — no server log.',
+      'Takeshicc: workspace is not a git repository — no server configured.',
     );
-    return;
+    return undefined;
   }
 
   let group: ResolvedGroup | undefined;
@@ -487,16 +490,26 @@ export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
       `Takeshicc: invalid config at ${CONFIG_PATH} — ` +
         `${err instanceof Error ? err.message : String(err)}`,
     );
-    return;
+    return undefined;
   }
   if (!group) {
     vscode.window.showInformationMessage(
-      `Takeshicc: "${groupKey}" is not in ${CONFIG_PATH} — no server log.`,
+      `Takeshicc: "${groupKey}" is not in ${CONFIG_PATH} — no server configured.`,
     );
+    return undefined;
+  }
+  return group.port;
+}
+
+// Command handler: opens the per-port server log for the current workspace's
+// configured group, or explains why there is none.
+export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
+  const port = await resolveConfiguredPort(log);
+  if (port === undefined) {
     return;
   }
 
-  const logPath = serverLogPath(group.port);
+  const logPath = serverLogPath(port);
   if (!fs.existsSync(logPath)) {
     vscode.window.showInformationMessage(
       `Takeshicc: no server log at ${logPath} yet — the server has not been spawned.`,
@@ -506,4 +519,32 @@ export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
 
   const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(logPath));
   await vscode.window.showTextDocument(doc);
+}
+
+// Command handler: copies a shell one-liner that kills this repo's server to
+// the clipboard — for fast dev iteration. The server is a long-lived detached
+// process; after rebuilding it the old one keeps serving stale code until it
+// idle-exits, so paste this into a terminal to drop it and let the next
+// connect spawn the fresh build. Kills by port: the port is the worktree-
+// independent identity (every worktree of the repo shares one server), so this
+// works whichever worktree the command is run from.
+export async function copyServerKillCommand(
+  log: vscode.OutputChannel,
+): Promise<void> {
+  const port = await resolveConfiguredPort(log);
+  if (port === undefined) {
+    return;
+  }
+
+  const cmd =
+    process.platform === 'win32'
+      ? `Get-NetTCPConnection -LocalPort ${port} -State Listen ` +
+        `-ErrorAction SilentlyContinue | ` +
+        `% { Stop-Process -Id $_.OwningProcess -Force }`
+      : `lsof -ti tcp:${port} | xargs kill`;
+
+  await vscode.env.clipboard.writeText(cmd);
+  vscode.window.showInformationMessage(
+    `Takeshicc: server kill command (port ${port}) copied to clipboard.`,
+  );
 }

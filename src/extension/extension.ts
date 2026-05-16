@@ -3,6 +3,7 @@ import { applyLayout } from './applyLayout';
 import { openConfig } from './config';
 import { registerPasteFileRef } from './pasteFileRef';
 import {
+  copyServerKillCommand,
   getOrCreateServer,
   openServerLog,
   ServerClient,
@@ -179,6 +180,9 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig()),
     vscode.commands.registerCommand('takeshicc.openServerLog', () =>
       openServerLog(log),
+    ),
+    vscode.commands.registerCommand('takeshicc.copyServerKillCommand', () =>
+      copyServerKillCommand(log),
     ),
   );
   registerPasteFileRef(context);
