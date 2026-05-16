@@ -10,6 +10,11 @@ import { HOST, ROUTES } from './protocol';
 
 const IDLE_CHECK_MS = 5_000;
 
+// Timestamped line to stdout — captured into ~/.takeshicc/server-<port>.log.
+function log(msg: string): void {
+  console.log(`${new Date().toISOString()} ${msg}`);
+}
+
 // argv[2] = port, argv[3] = groupKey, argv[4] = idleTimeoutMs, argv[5] = version.
 const port = Number(process.argv[2]);
 const groupKey = process.argv[3];
@@ -43,23 +48,33 @@ app.use((_req, _res, next) => {
   next();
 });
 
-app.get(ROUTES.whoami, (_req, res) => {
+app.get(ROUTES.whoami, (req, res) => {
+  // /whoami is a client's connect handshake — one per window activation.
+  log(`client connected: GET ${ROUTES.whoami} from ${req.socket.remoteAddress ?? '?'}`);
   res.status(200).json({ groupKey, version });
 });
 
 app.get(ROUTES.ping, (_req, res) => {
+  // Heartbeat — fires every idleTimeoutMs/3, so it is intentionally not logged.
   res.status(200).send('ok');
 });
 
-app.use((_req, res) => {
+app.use((req, res) => {
+  log(`404: ${req.method} ${req.url}`);
   res.status(404).send('not found');
 });
 
-const server = app.listen(port, HOST);
+const server = app.listen(port, HOST, () => {
+  log(
+    `listening on ${HOST}:${port} — group "${groupKey}", v${version}, ` +
+      `idleTimeoutMs ${idleTimeoutMs}`,
+  );
+});
 
 server.on('error', (err: NodeJS.ErrnoException) => {
   // A sibling won the bind — that process is the server; this one is redundant.
   if (err.code === 'EADDRINUSE') {
+    log(`port ${port} already bound by a sibling — exiting`);
     process.exit(0);
   }
   console.error(err);
@@ -70,6 +85,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 // or fully free), avoiding a closed-but-alive split-brain window.
 setInterval(() => {
   if (Date.now() - lastActivityAt > idleTimeoutMs) {
+    log(`idle for >${idleTimeoutMs}ms with no requests — exiting`);
     process.exit(0);
   }
 }, IDLE_CHECK_MS).unref();

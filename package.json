@@ -33,6 +33,11 @@
         "command": "takeshicc.openConfig",
         "title": "Open Config File",
         "category": "Takeshicc"
+      },
+      {
+        "command": "takeshicc.openServerLog",
+        "title": "Open Server Log",
+        "category": "Takeshicc"
       }
     ],
     "keybindings": [

@@ -292,3 +292,49 @@ export async function getOrCreateServer(
     );
   }
 }
+
+// Command handler: opens the per-port server log for the current workspace's
+// configured group, or explains why there is none.
+export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
+    return;
+  }
+
+  const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
+  if (!groupKey) {
+    vscode.window.showInformationMessage(
+      'Takeshicc: workspace is not a git repository — no server log.',
+    );
+    return;
+  }
+
+  let group: ResolvedGroup | undefined;
+  try {
+    group = lookupGroup(groupKey);
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Takeshicc: invalid config at ${CONFIG_PATH} — ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  if (!group) {
+    vscode.window.showInformationMessage(
+      `Takeshicc: "${groupKey}" is not in ${CONFIG_PATH} — no server log.`,
+    );
+    return;
+  }
+
+  const logPath = serverLogPath(group.port);
+  if (!fs.existsSync(logPath)) {
+    vscode.window.showInformationMessage(
+      `Takeshicc: no server log at ${logPath} yet — the server has not been spawned.`,
+    );
+    return;
+  }
+
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(logPath));
+  await vscode.window.showTextDocument(doc);
+}

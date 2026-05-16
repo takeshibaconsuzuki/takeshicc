@@ -2,19 +2,21 @@ import * as vscode from 'vscode';
 import { applyLayout } from './applyLayout';
 import { openConfig } from './config';
 import { registerPasteFileRef } from './pasteFileRef';
-import { getOrCreateServer, ServerClient } from './getOrCreateServer';
+import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateServer';
 
 let serverClient: ServerClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
+  // Created before commands so the openServerLog handler can log through it.
+  const log = vscode.window.createOutputChannel('Takeshicc');
   context.subscriptions.push(
+    log,
     vscode.commands.registerCommand('takeshicc.applyLayout', () => applyLayout(context)),
-    vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig())
+    vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig()),
+    vscode.commands.registerCommand('takeshicc.openServerLog', () => openServerLog(log))
   );
   registerPasteFileRef(context);
 
-  const log = vscode.window.createOutputChannel('Takeshicc');
-  context.subscriptions.push(log);
   log.appendLine(
     `Takeshicc: extension activated (v${context.extension.packageJSON.version ?? '?'}).`,
   );
