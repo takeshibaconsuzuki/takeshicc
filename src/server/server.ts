@@ -50,6 +50,32 @@ let lastActivityAt = Date.now();
 // fine — Claude Code's hooks re-report each chat's state on its next event.
 const liveChats = new Map<string, LiveChatMetadata>();
 
+// Connected /events subscribers. Each receives the full snapshot on connect
+// and again on every change to the live set — this is the server-push channel.
+const sseClients = new Set<express.Response>();
+
+// The current live-chat set as a plain array — the payload of both
+// GET /get-live-chats and every /events push.
+function chatSnapshot(): LiveChatMetadata[] {
+  return [...liveChats.values()];
+}
+
+// Push the current snapshot to every connected /events subscriber.
+function broadcastLiveChats(): void {
+  if (sseClients.size === 0) {
+    return;
+  }
+  const payload = `data: ${JSON.stringify(chatSnapshot())}\n\n`;
+  for (const res of sseClients) {
+    try {
+      res.write(payload);
+    } catch {
+      // Write to a half-dead socket — drop it; its 'close' will also fire.
+      sseClients.delete(res);
+    }
+  }
+}
+
 const app = express();
 
 // Mark activity on every request so the idle check can never exit under load.
@@ -94,8 +120,12 @@ app.post(ROUTES.updateChatState, (req, res) => {
   const effect: HookEffect = HOOK_EFFECTS[eventName] ?? 'busy';
 
   if (effect === 'end') {
-    liveChats.delete(chatId);
-    log(`chat ${chatId}: ${eventName} -> ended`);
+    if (liveChats.delete(chatId)) {
+      log(`chat ${chatId}: ${eventName} -> ended`);
+      broadcastLiveChats();
+    } else {
+      log(`chat ${chatId}: ${eventName} -> ignored (untracked)`);
+    }
   } else if (effect === 'keep') {
     // A 'keep' event carries no run-state signal. For a tracked chat it just
     // refreshes liveness; for an untracked one there is no state to keep, so
@@ -107,17 +137,43 @@ app.post(ROUTES.updateChatState, (req, res) => {
     }
     liveChats.set(chatId, { chatId, state: existing.state, mTime: now });
     log(`chat ${chatId}: ${eventName} -> kept (${existing.state})`);
+    broadcastLiveChats();
   } else {
     liveChats.set(chatId, { chatId, state: effect, mTime: now });
     log(`chat ${chatId}: ${eventName} -> ${effect}`);
+    broadcastLiveChats();
   }
   res.status(200).end();
 });
 
-// /get-live-chats — current snapshot of every tracked chat.
+// /get-live-chats — synchronous snapshot of every tracked chat. The /events
+// stream below is the push equivalent; this remains as a one-shot/debug read.
 app.get(ROUTES.getLiveChats, (_req, res) => {
-  const chats: LiveChatMetadata[] = [...liveChats.values()];
-  res.status(200).json(chats);
+  res.status(200).json(chatSnapshot());
+});
+
+// /subscribe-live-chats — Server-Sent Events stream of live-chat snapshots.
+// The current snapshot is sent immediately on connect, then a fresh snapshot
+// on every change to the live set (see broadcastLiveChats). This is the push
+// channel the extension subscribes to in place of polling /get-live-chats.
+app.get(ROUTES.subscribeLiveChats, (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  // Flush each snapshot the instant it is written, without Nagle batching.
+  req.socket.setNoDelay(true);
+  sseClients.add(res);
+  log(`SSE client connected — ${sseClients.size} subscriber(s)`);
+
+  // Initial snapshot so a fresh subscriber starts in sync.
+  res.write(`data: ${JSON.stringify(chatSnapshot())}\n\n`);
+
+  req.on('close', () => {
+    sseClients.delete(res);
+    log(`SSE client disconnected — ${sseClients.size} subscriber(s)`);
+  });
 });
 
 app.use((req, res) => {

@@ -9,12 +9,16 @@ export const ROUTES = {
   ping: '/ping',
   updateChatState: '/update-chat-state',
   getLiveChats: '/get-live-chats',
+  // Server-Sent Events stream: pushes the full LiveChatMetadata[] snapshot on
+  // connect and again on every change to the live set.
+  subscribeLiveChats: '/subscribe-live-chats',
 } as const;
 
 // A Claude Code chat's run state, derived from its hook events.
 export type ChatState = 'idle' | 'busy';
 
-// One live Claude Code chat, as returned by GET /get-live-chats.
+// One live Claude Code chat — the element type returned by GET /get-live-chats
+// and pushed (as a full array) over the /events SSE stream.
 export interface LiveChatMetadata {
   chatId: string;
   state: ChatState;

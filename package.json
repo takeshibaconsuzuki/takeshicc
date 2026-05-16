@@ -50,6 +50,24 @@
         "key": "ctrl+`"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "takeshicc",
+          "title": "Takeshicc",
+          "icon": "media/activity-bar.svg"
+        }
+      ]
+    },
+    "views": {
+      "takeshicc": [
+        {
+          "type": "webview",
+          "id": "takeshicc.liveChats",
+          "name": "Live Chats"
+        }
+      ]
+    },
     "configuration": {
       "title": "Takeshicc",
       "properties": {

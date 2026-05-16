@@ -11,7 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
-import { HOST, ROUTES } from '../server/protocol';
+import { HOST, LiveChatMetadata, ROUTES } from '../server/protocol';
 import { CONFIG_PATH, lookupGroup, ResolvedGroup } from './config';
 import { resolveGitGroup } from './gitGroup';
 import { registerHooks } from './registerHooks';
@@ -24,8 +24,15 @@ const POLL_DEADLINE_MS = 8_000;
 export interface ServerClient {
   port: number;
   groupKey: string;
+  // Subscribe to pushed live-chat snapshots from the server's /events SSE
+  // stream. onUpdate fires with the full snapshot on connect and on every
+  // change; the stream reconnects on its own and is torn down by close().
+  subscribeLiveChats(onUpdate: (chats: LiveChatMetadata[]) => void): void;
   close(): void;
 }
+
+const SSE_RECONNECT_MIN_MS = 500;
+const SSE_RECONNECT_MAX_MS = 5_000;
 
 type WhoamiResult =
   | { kind: 'ok'; groupKey: string; version: string }
@@ -168,6 +175,114 @@ function spawnServer(
   }
 }
 
+// A reconnecting Server-Sent Events subscription to the server's
+// /subscribe-live-chats stream. The server pushes the full live-chat snapshot
+// on connect and on every change; each event is parsed and handed to onUpdate.
+// A dropped connection is retried with jittered exponential backoff. It uses
+// its own connection — never the client's single-socket keep-alive agent,
+// which this long-lived stream would otherwise monopolize.
+function streamLiveChats(
+  port: number,
+  onUpdate: (chats: LiveChatMetadata[]) => void,
+  log: vscode.OutputChannel,
+): { close(): void } {
+  let closed = false;
+  let req: http.ClientRequest | undefined;
+  let reconnectTimer: NodeJS.Timeout | undefined;
+  let delay = SSE_RECONNECT_MIN_MS;
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer) {
+      return;
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, jitter(delay));
+    delay = Math.min(delay * 2, SSE_RECONNECT_MAX_MS);
+  };
+
+  const connect = () => {
+    if (closed) {
+      return;
+    }
+    let buffer = '';
+    let ended = false;
+    // Reconnect at most once per connection attempt, whichever end fires first.
+    const finish = () => {
+      if (!ended) {
+        ended = true;
+        scheduleReconnect();
+      }
+    };
+
+    req = http.get(
+      {
+        host: HOST,
+        port,
+        path: ROUTES.subscribeLiveChats,
+        headers: { Accept: 'text/event-stream' },
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          finish();
+          return;
+        }
+        delay = SSE_RECONNECT_MIN_MS; // a healthy connection resets the backoff
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          buffer += chunk;
+          // SSE events are separated by a blank line.
+          let sep: number;
+          while ((sep = buffer.indexOf('\n\n')) !== -1) {
+            const event = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const data = event
+              .split('\n')
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trim())
+              .join('');
+            if (!data) {
+              continue;
+            }
+            try {
+              onUpdate(JSON.parse(data) as LiveChatMetadata[]);
+            } catch {
+              log.appendLine(
+                'Takeshicc: ignored an unparseable /events message.',
+              );
+            }
+          }
+        });
+        res.on('end', finish);
+        res.on('error', finish);
+      },
+    );
+    req.on('error', (err) => {
+      if (!closed) {
+        log.appendLine(
+          `Takeshicc: /events stream error — ${(err as Error).message}; reconnecting.`,
+        );
+      }
+      finish();
+    });
+  };
+
+  connect();
+
+  return {
+    close() {
+      closed = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      req?.destroy();
+    },
+  };
+}
+
 // Builds a ServerClient: a keep-alive agent plus a heartbeat interval that
 // keeps the server from idle-exiting under a live client.
 function makeClient(
@@ -190,12 +305,19 @@ function makeClient(
     });
   }, heartbeatMs);
   timer.unref();
+
+  let sse: { close(): void } | undefined;
   return {
     port,
     groupKey,
+    subscribeLiveChats(onUpdate) {
+      sse?.close(); // a second call replaces the prior subscription
+      sse = streamLiveChats(port, onUpdate, log);
+    },
     close() {
       clearInterval(timer);
       agent.destroy();
+      sse?.close();
     },
   };
 }
