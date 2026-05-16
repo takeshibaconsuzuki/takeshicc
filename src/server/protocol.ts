@@ -96,4 +96,5 @@ export const HOOK_EFFECTS: Record<string, HookEffect> = {
 // in HOOK_EFFECTS. Registering the full set means the server observes every
 // lifecycle point — so mTime tracks true last activity, and the 'busy'
 // fallback is reserved purely for events Claude Code adds in the future.
-export const HOOK_REGISTER_EVENTS: readonly string[] = Object.keys(HOOK_EFFECTS);
+export const HOOK_REGISTER_EVENTS: readonly string[] =
+  Object.keys(HOOK_EFFECTS);

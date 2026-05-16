@@ -45,7 +45,11 @@ export async function registerHooks(
   log: vscode.OutputChannel,
 ): Promise<void> {
   const url = `http://${HOST}:${port}${ROUTES.updateChatState}`;
-  const settingsPath = path.join(workspacePath, '.claude', 'settings.local.json');
+  const settingsPath = path.join(
+    workspacePath,
+    '.claude',
+    'settings.local.json',
+  );
 
   let raw: string | undefined;
   let settings: Record<string, unknown> = {};
@@ -86,7 +90,9 @@ export async function registerHooks(
         }
         return { ...block, hooks: block.hooks.filter((h) => !isOurHook(h)) };
       })
-      .filter((block) => !Array.isArray(block?.hooks) || block.hooks.length > 0);
+      .filter(
+        (block) => !Array.isArray(block?.hooks) || block.hooks.length > 0,
+      );
 
     cleaned.push({ hooks: [{ type: 'http', url }] });
     allHooks[event] = cleaned;
@@ -100,7 +106,9 @@ export async function registerHooks(
   try {
     await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
     await fs.promises.writeFile(settingsPath, next, 'utf8');
-    log.appendLine(`Takeshicc: registered HTTP hook ${url} in ${settingsPath}.`);
+    log.appendLine(
+      `Takeshicc: registered HTTP hook ${url} in ${settingsPath}.`,
+    );
   } catch (err) {
     log.appendLine(
       `Takeshicc: could not write ${settingsPath} — ${(err as Error).message}.`,

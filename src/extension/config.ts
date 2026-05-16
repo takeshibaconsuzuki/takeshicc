@@ -64,9 +64,15 @@ export async function openConfig(): Promise<void> {
   try {
     await fs.promises.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
     if (!fs.existsSync(CONFIG_PATH)) {
-      await fs.promises.writeFile(CONFIG_PATH, '{\n  "groups": {}\n}\n', 'utf8');
+      await fs.promises.writeFile(
+        CONFIG_PATH,
+        '{\n  "groups": {}\n}\n',
+        'utf8',
+      );
     }
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(CONFIG_PATH));
+    const doc = await vscode.workspace.openTextDocument(
+      vscode.Uri.file(CONFIG_PATH),
+    );
     await vscode.window.showTextDocument(doc);
   } catch (err) {
     vscode.window.showErrorMessage(

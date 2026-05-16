@@ -160,7 +160,9 @@ function spawnServer(
       },
     );
     child.unref();
-    log.appendLine(`Takeshicc: spawned server (pid ${child.pid ?? '?'}) on port ${port}.`);
+    log.appendLine(
+      `Takeshicc: spawned server (pid ${child.pid ?? '?'}) on port ${port}.`,
+    );
   } finally {
     fs.closeSync(fd); // the child holds its own dup of the fd
   }
@@ -177,9 +179,12 @@ function makeClient(
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
   const heartbeatMs = Math.floor(idleTimeoutMs / 3);
   const timer = setInterval(() => {
-    const req = http.get({ host: HOST, port, path: ROUTES.ping, agent }, (res) => {
-      res.resume();
-    });
+    const req = http.get(
+      { host: HOST, port, path: ROUTES.ping, agent },
+      (res) => {
+        res.resume();
+      },
+    );
     req.on('error', (err) => {
       log.appendLine(`Takeshicc: heartbeat failed — ${(err as Error).message}`);
     });
@@ -307,7 +312,9 @@ export async function getOrCreateServer(
 export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
-    vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
+    vscode.window.showInformationMessage(
+      'Takeshicc: no workspace folder open.',
+    );
     return;
   }
 

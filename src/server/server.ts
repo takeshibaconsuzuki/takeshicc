@@ -5,8 +5,14 @@
 // fails with EADDRINUSE and this process exits(0) (the duplicate spawn is
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
-import express = require('express');
-import { HOST, HOOK_EFFECTS, HookEffect, LiveChatMetadata, ROUTES } from './protocol';
+import express from 'express';
+import {
+  HOST,
+  HOOK_EFFECTS,
+  HookEffect,
+  LiveChatMetadata,
+  ROUTES,
+} from './protocol';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -57,7 +63,9 @@ app.use(express.json());
 
 app.get(ROUTES.whoami, (req, res) => {
   // /whoami is a client's connect handshake — one per window activation.
-  log(`client connected: GET ${ROUTES.whoami} from ${req.socket.remoteAddress ?? '?'}`);
+  log(
+    `client connected: GET ${ROUTES.whoami} from ${req.socket.remoteAddress ?? '?'}`,
+  );
   res.status(200).json({ groupKey, version });
 });
 

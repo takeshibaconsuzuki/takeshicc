@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 function findCodeOnPath() {
   const PATH = process.env.PATH || '';
@@ -46,8 +49,15 @@ function findByParentWalk(start) {
     try {
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!e.isDirectory()) continue;
-        const candidate = path.join(dir, e.name, 'resources', 'app', 'package.json');
-        if (fs.existsSync(candidate) && hasElectronDep(candidate)) return candidate;
+        const candidate = path.join(
+          dir,
+          e.name,
+          'resources',
+          'app',
+          'package.json',
+        );
+        if (fs.existsSync(candidate) && hasElectronDep(candidate))
+          return candidate;
       }
     } catch {
       // unreadable dir; keep walking
@@ -69,7 +79,7 @@ function findByScriptParse(scriptPath) {
     return null;
   }
   const scriptDir = path.dirname(scriptPath);
-  const re = /([^"'\s%]*?[\/\\]resources[\/\\]app)(?=[\/\\])/gi;
+  const re = /([^"'\s%]*?[/\\]resources[/\\]app)(?=[/\\])/gi;
   for (const m of content.matchAll(re)) {
     let p = m[1];
     if (!p) continue;
@@ -95,7 +105,9 @@ function detect() {
   }
   const wrapper = findCodeOnPath();
   if (!wrapper) {
-    throw new Error("Could not find 'code' on PATH. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.");
+    throw new Error(
+      "Could not find 'code' on PATH. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.",
+    );
   }
   let real;
   try {
@@ -107,18 +119,22 @@ function detect() {
   if (!pkg) {
     throw new Error(
       `Found 'code' at ${wrapper} but could not locate VS Code's package.json. ` +
-        'Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.'
+        'Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.',
     );
   }
   const version = readElectronVersion(pkg);
   if (!version) {
-    throw new Error(`Read ${pkg} but found no electron dep. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.`);
+    throw new Error(
+      `Read ${pkg} but found no electron dep. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.`,
+    );
   }
   return { version, source: pkg };
 }
 
 const { version, source } = detect();
-console.log(`Rebuilding better-sqlite3 for Electron ${version} (from ${source})`);
+console.log(
+  `Rebuilding better-sqlite3 for Electron ${version} (from ${source})`,
+);
 
 await rebuild({
   buildPath: PROJECT_ROOT,

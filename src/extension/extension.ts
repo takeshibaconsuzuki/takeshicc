@@ -2,7 +2,11 @@ import * as vscode from 'vscode';
 import { applyLayout } from './applyLayout';
 import { openConfig } from './config';
 import { registerPasteFileRef } from './pasteFileRef';
-import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateServer';
+import {
+  getOrCreateServer,
+  openServerLog,
+  ServerClient,
+} from './getOrCreateServer';
 
 let serverClient: ServerClient | undefined;
 
@@ -11,9 +15,13 @@ export async function activate(context: vscode.ExtensionContext) {
   const log = vscode.window.createOutputChannel('Takeshicc');
   context.subscriptions.push(
     log,
-    vscode.commands.registerCommand('takeshicc.applyLayout', () => applyLayout(context)),
+    vscode.commands.registerCommand('takeshicc.applyLayout', () =>
+      applyLayout(context),
+    ),
     vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig()),
-    vscode.commands.registerCommand('takeshicc.openServerLog', () => openServerLog(log))
+    vscode.commands.registerCommand('takeshicc.openServerLog', () =>
+      openServerLog(log),
+    ),
   );
   registerPasteFileRef(context);
 
@@ -28,7 +36,7 @@ export async function activate(context: vscode.ExtensionContext) {
     })
     .catch((err) => {
       log.appendLine(
-        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     });
 }

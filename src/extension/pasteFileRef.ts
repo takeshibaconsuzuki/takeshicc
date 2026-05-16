@@ -8,7 +8,8 @@ const COMMAND_ID = 'takeshicc.pasteFileRef';
 // terminal too.
 async function ensureSkipShell() {
   const config = vscode.workspace.getConfiguration('terminal.integrated');
-  const userValue = config.inspect<string[]>('commandsToSkipShell')?.globalValue ?? [];
+  const userValue =
+    config.inspect<string[]>('commandsToSkipShell')?.globalValue ?? [];
   if (userValue.includes(COMMAND_ID)) {
     return;
   }
@@ -16,13 +17,13 @@ async function ensureSkipShell() {
     await config.update(
       'commandsToSkipShell',
       [...userValue, COMMAND_ID],
-      vscode.ConfigurationTarget.Global
+      vscode.ConfigurationTarget.Global,
     );
   } catch (err) {
     vscode.window.showWarningMessage(
       `Takeshicc: could not register Alt+K for the terminal — add "${COMMAND_ID}" ` +
         'to terminal.integrated.commandsToSkipShell manually. ' +
-        `(${err instanceof Error ? err.message : String(err)})`
+        `(${err instanceof Error ? err.message : String(err)})`,
     );
   }
 }
@@ -53,16 +54,21 @@ export function registerPasteFileRef(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand(COMMAND_ID, () => {
       const editor = vscode.window.activeTextEditor ?? lastEditor;
       if (!editor) {
-        vscode.window.showWarningMessage('Takeshicc: open a file to reference first.');
+        vscode.window.showWarningMessage(
+          'Takeshicc: open a file to reference first.',
+        );
         return;
       }
       const selection = vscode.window.activeTextEditor
         ? editor.selection
-        : lastSelection ?? editor.selection;
+        : (lastSelection ?? editor.selection);
 
-      const terminal = vscode.window.activeTerminal ?? vscode.window.terminals[0];
+      const terminal =
+        vscode.window.activeTerminal ?? vscode.window.terminals[0];
       if (!terminal) {
-        vscode.window.showWarningMessage('Takeshicc: no terminal open to paste into.');
+        vscode.window.showWarningMessage(
+          'Takeshicc: no terminal open to paste into.',
+        );
         return;
       }
 
@@ -91,6 +97,6 @@ export function registerPasteFileRef(context: vscode.ExtensionContext) {
       // Trailing space, no newline — the user keeps typing their prompt.
       terminal.sendText(ref + ' ', false);
       terminal.show();
-    })
+    }),
   );
 }

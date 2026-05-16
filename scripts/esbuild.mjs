@@ -39,12 +39,13 @@ const argv = process.argv.slice(2);
 const watch = argv.includes('--watch');
 const which = argv.find((a) => !a.startsWith('--')) ?? 'all';
 
-const selected =
-  which === 'all' ? Object.keys(configs) : [which];
+const selected = which === 'all' ? Object.keys(configs) : [which];
 
 for (const name of selected) {
   if (!configs[name]) {
-    console.error(`Unknown build target: ${name} (expected ext | server | all)`);
+    console.error(
+      `Unknown build target: ${name} (expected ext | server | all)`,
+    );
     process.exit(1);
   }
 }

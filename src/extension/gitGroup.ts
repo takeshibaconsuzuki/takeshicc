@@ -11,7 +11,10 @@ import * as vscode from 'vscode';
 // drive letter. Applied identically on both sides (here and in config.ts).
 export function canonicalizePath(p: string): string {
   let resolved = path.resolve(p).replace(/\\/g, '/');
-  resolved = resolved.replace(/^([a-zA-Z]):/, (_m, drive: string) => `${drive.toLowerCase()}:`);
+  resolved = resolved.replace(
+    /^([a-zA-Z]):/,
+    (_m, drive: string) => `${drive.toLowerCase()}:`,
+  );
   return resolved;
 }
 
@@ -51,17 +54,26 @@ export async function resolveGitGroup(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
-      log.appendLine('Takeshicc: git not found on PATH — server feature disabled.');
+      log.appendLine(
+        'Takeshicc: git not found on PATH — server feature disabled.',
+      );
     } else {
       // Non-zero exit (incl. "fatal: not a git repository") -> bail.
-      log.appendLine(`Takeshicc: ${workspaceFolderFsPath} is not a git repository — server feature off.`);
+      log.appendLine(
+        `Takeshicc: ${workspaceFolderFsPath} is not a git repository — server feature off.`,
+      );
     }
     return undefined;
   }
 
-  const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
   if (lines.length < 2) {
-    log.appendLine(`Takeshicc: unexpected git rev-parse output — server feature off.`);
+    log.appendLine(
+      `Takeshicc: unexpected git rev-parse output — server feature off.`,
+    );
     return undefined;
   }
   const gitCommonDir = lines[0];
@@ -69,12 +81,16 @@ export async function resolveGitGroup(
 
   // The real guard: a bare repo has no main worktree.
   if (isBare === 'true') {
-    log.appendLine(`Takeshicc: ${workspaceFolderFsPath} is a bare git repository — server feature off.`);
+    log.appendLine(
+      `Takeshicc: ${workspaceFolderFsPath} is a bare git repository — server feature off.`,
+    );
     return undefined;
   }
   // Belt-and-suspenders: a bare repo's common dir does not end in `.git`.
   if (!/[\\/]\.git$/.test(gitCommonDir)) {
-    log.appendLine(`Takeshicc: git common dir "${gitCommonDir}" is not a worktree .git — server feature off.`);
+    log.appendLine(
+      `Takeshicc: git common dir "${gitCommonDir}" is not a worktree .git — server feature off.`,
+    );
     return undefined;
   }
 
