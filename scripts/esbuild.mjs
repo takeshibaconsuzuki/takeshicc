@@ -34,6 +34,14 @@ const configs = {
     entryPoints: ['src/server/server.ts'],
     outfile: 'out/server.js',
     external: [],
+    // The Claude Agent SDK is ESM and runs `createRequire(import.meta.url)` at
+    // load time; esbuild leaves `import.meta.url` empty in a CJS bundle, which
+    // crashes that call. Point it at the bundle's own file URL — createRequire
+    // only needs a valid base path, and after bundling that is out/server.js.
+    define: { 'import.meta.url': '__importMetaUrl' },
+    banner: {
+      js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
+    },
   },
   reporter: {
     ...shared,

@@ -30,15 +30,23 @@ export interface LiveChatMetadata {
   // Absent until the reporter has first run (or if it could not reach the
   // server).
   ancestorPids?: number[];
+  // Human-readable label for the chat — the session's custom title, else its
+  // auto-generated summary, else its first prompt (the same precedence Claude
+  // Code's own resume picker uses). Resolved asynchronously by the server via
+  // the Claude Agent SDK's getSessionInfo; absent until the first lookup for
+  // this chat resolves (a brand-new session has no extractable summary yet).
+  summary?: string;
 }
 
 // The subset of a Claude Code hook event payload the server relies on. Hooks
 // POST their full JSON payload; only these fields are read. session_id and
-// hook_event_name drive chat state; ancestorPids is added by the reporter hook
-// (see src/reporter) and carried through unchanged.
+// hook_event_name drive chat state; cwd is the session's working directory,
+// used to locate its transcript when resolving the summary; ancestorPids is
+// added by the reporter hook (see src/reporter) and carried through unchanged.
 export interface HookEvent {
   session_id: string;
   hook_event_name: string;
+  cwd?: string;
   ancestorPids?: number[];
 }
 

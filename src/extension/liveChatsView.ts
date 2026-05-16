@@ -162,11 +162,10 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     min-width: 0;
     flex: 1 1 auto;
   }
-  .id {
+  .label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--vscode-editor-font-family, monospace);
   }
   .sub {
     color: var(--vscode-descriptionForeground);
@@ -204,9 +203,17 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   function chatEl(chat, revealable) {
     const row = document.createElement('div');
     row.className = revealable ? 'chat revealable' : 'chat';
-    row.title = revealable
-      ? 'Click to focus this chat\\u2019s terminal'
+
+    // The row label is the chat's summary (its session title / summary / first
+    // prompt), falling back to the raw id until the server resolves one. The
+    // tooltip carries the full, untruncated label plus that raw id.
+    const labelText = chat.summary || chat.chatId;
+    const tip = chat.summary
+      ? chat.summary + '\\n' + chat.chatId
       : chat.chatId;
+    row.title = revealable
+      ? 'Click to focus this chat\\u2019s terminal\\n' + tip
+      : tip;
     if (revealable) {
       row.addEventListener('click', function () {
         vscode.postMessage({ type: 'reveal', chatId: chat.chatId });
@@ -220,10 +227,10 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     const meta = document.createElement('div');
     meta.className = 'meta';
 
-    const id = document.createElement('span');
-    id.className = 'id';
-    id.textContent = chat.chatId;
-    meta.appendChild(id);
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = labelText;
+    meta.appendChild(label);
 
     const sub = document.createElement('span');
     sub.className = 'sub';

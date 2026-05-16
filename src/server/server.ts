@@ -6,6 +6,7 @@
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
 import express from 'express';
+import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import {
   HOST,
   HOOK_EFFECTS,
@@ -76,6 +77,44 @@ function broadcastLiveChats(): void {
   }
 }
 
+// chatIds with a getSessionInfo lookup in flight. One hook turn fires many
+// events; this guard keeps the same chat from being queried concurrently.
+const summaryInFlight = new Set<string>();
+
+// Resolve a chat's display label via the Claude Agent SDK and, if it changed,
+// store it on the chat and re-broadcast. getSessionInfo reads only the
+// session's JSONL transcript — no network, no `claude` process — and its
+// `summary` is the session's custom title, else its auto-generated summary,
+// else its first prompt. Best-effort and fully async: the hook response never
+// waits on it, and any failure is logged and swallowed.
+function refreshSummary(chatId: string, cwd: string | undefined): void {
+  if (summaryInFlight.has(chatId)) {
+    return;
+  }
+  summaryInFlight.add(chatId);
+  // `dir` just points the lookup straight at the right project directory; with
+  // it omitted the SDK searches every project, which still works, only slower.
+  void getSessionInfo(chatId, cwd ? { dir: cwd } : undefined)
+    .then((info) => {
+      const summary = info?.summary;
+      const chat = liveChats.get(chatId);
+      // The chat may have ended while the lookup was in flight — drop the
+      // result rather than resurrect it. A missing/unchanged summary is a no-op.
+      if (!chat || !summary || chat.summary === summary) {
+        return;
+      }
+      liveChats.set(chatId, { ...chat, summary });
+      log(`chat ${chatId}: summary -> ${JSON.stringify(summary)}`);
+      broadcastLiveChats();
+    })
+    .catch((err) => {
+      log(`chat ${chatId}: getSessionInfo failed — ${(err as Error).message}`);
+    })
+    .finally(() => {
+      summaryInFlight.delete(chatId);
+    });
+}
+
 const app = express();
 
 // Mark activity on every request so the idle check can never exit under load.
@@ -107,6 +146,7 @@ app.post(ROUTES.updateChatState, (req, res) => {
   const body = req.body as {
     session_id?: unknown;
     hook_event_name?: unknown;
+    cwd?: unknown;
     ancestorPids?: unknown;
   };
   const chatId = body?.session_id;
@@ -115,9 +155,16 @@ app.post(ROUTES.updateChatState, (req, res) => {
     res.status(400).json({ error: 'expected { session_id, hook_event_name }' });
     return;
   }
+  const cwd = typeof body.cwd === 'string' ? body.cwd : undefined;
 
   const existing = liveChats.get(chatId);
   const now = Date.now();
+
+  // Re-resolve the chat's summary when it has none yet, or at a turn boundary
+  // (UserPromptSubmit) — the cheapest schedule that still catches the first
+  // prompt, a later auto-generated summary, and a /rename. The in-flight guard
+  // makes a redundant call a no-op, so this never piles up under a busy turn.
+  const wantSummary = !existing?.summary || eventName === 'UserPromptSubmit';
 
   // ancestorPids arrives only on the reporter hook's POST; every other event
   // omits it. An empty list (the reporter ran but resolved nothing) counts as
@@ -162,13 +209,26 @@ app.post(ROUTES.updateChatState, (req, res) => {
       state: existing.state,
       mTime: now,
       ancestorPids,
+      summary: existing.summary,
     });
     log(`chat ${chatId}: ${eventName} -> kept (${existing.state})`);
     broadcastLiveChats();
+    if (wantSummary) {
+      refreshSummary(chatId, cwd);
+    }
   } else {
-    liveChats.set(chatId, { chatId, state: effect, mTime: now, ancestorPids });
+    liveChats.set(chatId, {
+      chatId,
+      state: effect,
+      mTime: now,
+      ancestorPids,
+      summary: existing?.summary,
+    });
     log(`chat ${chatId}: ${eventName} -> ${effect}`);
     broadcastLiveChats();
+    if (wantSummary) {
+      refreshSummary(chatId, cwd);
+    }
   }
   res.status(200).end();
 });
