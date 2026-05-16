@@ -60,12 +60,15 @@ export type HookEffect = ChatState | 'end' | 'keep';
 // Every Claude Code hook event mapped to its effect on chat state. 'busy'
 // means Claude is actively advancing the chat; 'idle' means it is not — either
 // the turn is over (Stop) or it is blocked waiting on the human (a permission
-// dialog, an MCP elicitation). Mid-turn work events — tool use, subagents,
-// tasks — are 'busy'. Events that can fire in any state (notifications,
-// file/config changes) or that are pure housekeeping (compaction) are 'keep':
-// they refresh liveness without flipping the state. Kept exhaustive so the
-// server never has to guess — an unrecognized event is the only thing that
-// falls back to 'busy'.
+// dialog, an MCP elicitation). Mid-turn tool-use events are 'busy'. Subagent
+// and task events are 'keep', not 'busy': they run inside a turn (already
+// 'busy' there) but can also outlive it — Claude Code spawns background
+// subagents/tasks that finish well after Stop — so they must not drive the
+// state. Events that can fire in any state (notifications, file/config
+// changes) or that are pure housekeeping (compaction) are 'keep' too: they
+// refresh liveness without flipping the state. Kept exhaustive so the server
+// never has to guess — an unrecognized event is the only thing that falls
+// back to 'busy'.
 export const HOOK_EFFECTS: Record<string, HookEffect> = {
   // Session lifecycle.
   SessionStart: 'idle', // session (re)started or cleared — the chat is awaiting input
@@ -90,11 +93,17 @@ export const HOOK_EFFECTS: Record<string, HookEffect> = {
   PostToolBatch: 'busy',
   ElicitationResult: 'busy', // the human answered — Claude resumes work
 
-  // Subagents and tasks — mid-turn (a subagent ending does not end the turn).
-  SubagentStart: 'busy',
-  SubagentStop: 'busy',
-  TaskCreated: 'busy',
-  TaskCompleted: 'busy',
+  // Subagents and tasks — 'keep', never 'busy'. They run within a turn (where
+  // the state is already 'busy' from UserPromptSubmit and tool use) but can
+  // also outlive it: Claude Code spawns background subagents/tasks that finish
+  // well after Stop — a post-turn recap is one. Marking these 'busy' let a
+  // late SubagentStop/TaskCompleted flip an already-idle chat back to busy,
+  // with no following Stop to clear it — stuck busy forever. 'keep' refreshes
+  // liveness only and leaves the turn's run-state to UserPromptSubmit/Stop.
+  SubagentStart: 'keep',
+  SubagentStop: 'keep',
+  TaskCreated: 'keep',
+  TaskCompleted: 'keep',
 
   // Context compaction — state-neutral housekeeping. It can fire mid-turn
   // (auto) or between turns (manual /compact), so it must never flip the state.
