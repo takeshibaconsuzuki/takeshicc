@@ -19,10 +19,14 @@ import { LiveChatMetadata } from '../server/protocol';
 type ViewStatus = 'connecting' | 'off' | 'ready' | 'error';
 
 // The ext -> webview message contract. The webview replies with a single
-// { type: 'ready' } once its script has loaded and can receive state.
+// { type: 'ready' } once its script has loaded and can receive state, and a
+// { type: 'reveal', chatId } when a revealable row is clicked.
 interface ViewState {
   status: ViewStatus;
   chats: LiveChatMetadata[];
+  // chatIds the extension can reveal — bound to a terminal in this window.
+  // Rows in this set render as clickable; clicking focuses their terminal.
+  revealable: string[];
   detail?: string;
 }
 
@@ -34,22 +38,35 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   // The latest state. Held so a view resolved (or re-resolved, after being
   // hidden) after data arrived still gets the current snapshot via the
   // 'ready' handshake.
-  private state: ViewState = { status: 'connecting', chats: [] };
+  private state: ViewState = {
+    status: 'connecting',
+    chats: [],
+    revealable: [],
+  };
 
-  constructor(private readonly log: vscode.OutputChannel) {}
+  // log: diagnostics channel. onReveal: invoked with the chatId of a clicked
+  // revealable row, so the extension can focus that chat's terminal.
+  constructor(
+    private readonly log: vscode.OutputChannel,
+    private readonly onReveal: (chatId: string) => void,
+  ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = this.html();
 
-    view.webview.onDidReceiveMessage((msg: { type?: string }) => {
-      // The webview signals it is ready to receive state; reply with whatever
-      // we currently have (it may have arrived before the view was resolved).
-      if (msg?.type === 'ready') {
-        this.post();
-      }
-    });
+    view.webview.onDidReceiveMessage(
+      (msg: { type?: string; chatId?: string }) => {
+        // The webview signals it is ready to receive state; reply with
+        // whatever we have (it may have arrived before the view resolved).
+        if (msg?.type === 'ready') {
+          this.post();
+        } else if (msg?.type === 'reveal' && typeof msg.chatId === 'string') {
+          this.onReveal(msg.chatId);
+        }
+      },
+    );
 
     view.onDidDispose(() => {
       if (this.view === view) {
@@ -58,24 +75,23 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  // Push a fresh chat snapshot — the single entry point a future server-push
-  // model calls per update.
-  update(chats: LiveChatMetadata[]): void {
-    this.state = { status: 'ready', chats };
+  // Push a fresh chat snapshot plus the set of chatIds that can be revealed.
+  update(chats: LiveChatMetadata[], revealable: Set<string>): void {
+    this.state = { status: 'ready', chats, revealable: [...revealable] };
     this.post();
   }
 
   // The server feature is disabled for this workspace (no config entry, not a
   // repo, etc.) — there is nothing to show.
   setOff(): void {
-    this.state = { status: 'off', chats: [] };
+    this.state = { status: 'off', chats: [], revealable: [] };
     this.post();
   }
 
   // Connected, but the chat snapshot could not be fetched.
   setError(detail: string): void {
     this.log.appendLine(`Takeshicc: live chats unavailable — ${detail}`);
-    this.state = { status: 'error', chats: [], detail };
+    this.state = { status: 'error', chats: [], revealable: [], detail };
     this.post();
   }
 
@@ -124,7 +140,10 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     gap: 8px;
     padding: 6px 12px;
   }
-  .chat:hover {
+  .chat.revealable {
+    cursor: pointer;
+  }
+  .chat.revealable:hover {
     background: var(--vscode-list-hoverBackground);
   }
   .dot {
@@ -182,10 +201,17 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     return el;
   }
 
-  function chatEl(chat) {
+  function chatEl(chat, revealable) {
     const row = document.createElement('div');
-    row.className = 'chat';
-    row.title = chat.chatId;
+    row.className = revealable ? 'chat revealable' : 'chat';
+    row.title = revealable
+      ? 'Click to focus this chat\\u2019s terminal'
+      : chat.chatId;
+    if (revealable) {
+      row.addEventListener('click', function () {
+        vscode.postMessage({ type: 'reveal', chatId: chat.chatId });
+      });
+    }
 
     const dot = document.createElement('span');
     dot.className = 'dot' + (chat.state === 'busy' ? ' busy' : '');
@@ -237,10 +263,11 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
       root.appendChild(emptyEl('No live chats.'));
       return;
     }
+    const revealable = new Set(state.revealable || []);
     header.textContent =
       chats.length + (chats.length === 1 ? ' live chat' : ' live chats');
     for (const chat of chats) {
-      root.appendChild(chatEl(chat));
+      root.appendChild(chatEl(chat, revealable.has(chat.chatId)));
     }
   }
 

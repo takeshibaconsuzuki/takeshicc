@@ -1,13 +1,15 @@
 // esbuild build script for both bundles.
 //
-// Produces two self-contained CJS bundles via esbuild's JS API:
+// Produces three self-contained CJS bundles via esbuild's JS API:
 //   - extension -> out/extension.js (vscode + better-sqlite3 external)
-//   - server    -> out/server.js   (no externals; express folded in)
+//   - server    -> out/server.js    (no externals; express folded in)
+//   - reporter  -> out/reporter.js  (no externals; the UserPromptSubmit hook)
 //
 // Type-checking is integrated via @jgoz/esbuild-plugin-typecheck, which runs
 // `tsc` in a worker against tsconfig.json — so every build/watch type-checks
 // and emits in one step. There is no separate `typecheck` script.
 
+import * as fs from 'fs';
 import * as esbuild from 'esbuild';
 import { typecheckPlugin } from '@jgoz/esbuild-plugin-typecheck';
 
@@ -33,6 +35,12 @@ const configs = {
     outfile: 'out/server.js',
     external: [],
   },
+  reporter: {
+    ...shared,
+    entryPoints: ['src/reporter/reporter.ts'],
+    outfile: 'out/reporter.js',
+    external: [],
+  },
 };
 
 const argv = process.argv.slice(2);
@@ -44,7 +52,7 @@ const selected = which === 'all' ? Object.keys(configs) : [which];
 for (const name of selected) {
   if (!configs[name]) {
     console.error(
-      `Unknown build target: ${name} (expected ext | server | all)`,
+      `Unknown build target: ${name} (expected ext | server | reporter | all)`,
     );
     process.exit(1);
   }
@@ -63,6 +71,12 @@ async function run() {
     } else {
       await esbuild.build(config);
       console.log(`[esbuild] built ${name} -> ${configs[name].outfile}`);
+    }
+    // The Windows reporter is a PowerShell script, not bundled — copy it next
+    // to the JS outputs so the extension can resolve it under out/.
+    if (name === 'reporter') {
+      fs.copyFileSync('src/reporter/reporter.ps1', 'out/reporter.ps1');
+      console.log('[esbuild] copied reporter.ps1 -> out/reporter.ps1');
     }
   }
 }

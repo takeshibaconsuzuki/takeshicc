@@ -104,7 +104,11 @@ app.get(ROUTES.ping, (_req, res) => {
 // hook event payload; session_id is the chat id and hook_event_name selects
 // the effect on that chat (see HOOK_EFFECTS).
 app.post(ROUTES.updateChatState, (req, res) => {
-  const body = req.body as { session_id?: unknown; hook_event_name?: unknown };
+  const body = req.body as {
+    session_id?: unknown;
+    hook_event_name?: unknown;
+    ancestorPids?: unknown;
+  };
   const chatId = body?.session_id;
   const eventName = body?.hook_event_name;
   if (typeof chatId !== 'string' || !chatId || typeof eventName !== 'string') {
@@ -114,6 +118,24 @@ app.post(ROUTES.updateChatState, (req, res) => {
 
   const existing = liveChats.get(chatId);
   const now = Date.now();
+
+  // ancestorPids arrives only on the reporter hook's POST; every other event
+  // omits it. An empty list (the reporter ran but resolved nothing) counts as
+  // omitted too, so neither it nor a plain event clobbers a good list already
+  // on file — fall back to whatever was last reported for this chat.
+  const reportedPids =
+    Array.isArray(body.ancestorPids) &&
+    body.ancestorPids.length > 0 &&
+    body.ancestorPids.every((n) => typeof n === 'number')
+      ? (body.ancestorPids as number[])
+      : undefined;
+  if (reportedPids) {
+    log(
+      `chat ${chatId}: ${eventName} reported ancestorPids ` +
+        `[${reportedPids.join(', ')}]`,
+    );
+  }
+  const ancestorPids = reportedPids ?? existing?.ancestorPids;
 
   // An unrecognized event means a hook fired, so the chat is doing something —
   // 'busy' is the safe fallback.
@@ -135,11 +157,16 @@ app.post(ROUTES.updateChatState, (req, res) => {
       res.status(200).end();
       return;
     }
-    liveChats.set(chatId, { chatId, state: existing.state, mTime: now });
+    liveChats.set(chatId, {
+      chatId,
+      state: existing.state,
+      mTime: now,
+      ancestorPids,
+    });
     log(`chat ${chatId}: ${eventName} -> kept (${existing.state})`);
     broadcastLiveChats();
   } else {
-    liveChats.set(chatId, { chatId, state: effect, mTime: now });
+    liveChats.set(chatId, { chatId, state: effect, mTime: now, ancestorPids });
     log(`chat ${chatId}: ${eventName} -> ${effect}`);
     broadcastLiveChats();
   }

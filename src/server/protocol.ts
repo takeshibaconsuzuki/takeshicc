@@ -23,13 +23,23 @@ export interface LiveChatMetadata {
   chatId: string;
   state: ChatState;
   mTime: number; // epoch ms of the last hook event for this chat
+  // Process-ancestor PIDs of this chat's Claude process, reported by the
+  // reporter hook on every UserPromptSubmit (see src/reporter). One of them is
+  // the PID of the VS Code terminal's shell — the extension matches it to a
+  // Terminal so a live-chat row can reveal the terminal hosting the session.
+  // Absent until the reporter has first run (or if it could not reach the
+  // server).
+  ancestorPids?: number[];
 }
 
 // The subset of a Claude Code hook event payload the server relies on. Hooks
-// POST their full JSON payload; only these two fields drive chat state.
+// POST their full JSON payload; only these fields are read. session_id and
+// hook_event_name drive chat state; ancestorPids is added by the reporter hook
+// (see src/reporter) and carried through unchanged.
 export interface HookEvent {
   session_id: string;
   hook_event_name: string;
+  ancestorPids?: number[];
 }
 
 // What an incoming hook event does to the chat it belongs to:

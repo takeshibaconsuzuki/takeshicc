@@ -8,15 +8,33 @@ import {
   ServerClient,
 } from './getOrCreateServer';
 import { LiveChatsViewProvider } from './liveChatsView';
+import { LiveChatMetadata } from '../server/protocol';
+import { TerminalTracker } from './terminalTracker';
 
 let serverClient: ServerClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
   // Created before commands so the openServerLog handler can log through it.
   const log = vscode.window.createOutputChannel('Takeshicc');
-  const liveChats = new LiveChatsViewProvider(log);
+
+  // Maps live chats to the terminals hosting them; clicking a chat row reveals
+  // its terminal through tracker.reveal().
+  const tracker = new TerminalTracker(log);
+  const liveChats = new LiveChatsViewProvider(log, (chatId) => {
+    const revealed = tracker.reveal(chatId);
+    log.appendLine(
+      `Takeshicc: row clicked for chat ${chatId} — ` +
+        `${revealed ? 'revealed its terminal' : 'no bound terminal'}.`,
+    );
+    if (!revealed) {
+      vscode.window.showInformationMessage(
+        'Takeshicc: that chat is not running in a terminal in this window.',
+      );
+    }
+  });
   context.subscriptions.push(
     log,
+    tracker,
     vscode.window.registerWebviewViewProvider(
       LiveChatsViewProvider.viewType,
       liveChats,
@@ -44,9 +62,21 @@ export async function activate(context: vscode.ExtensionContext) {
         liveChats.setOff();
         return;
       }
+      // The latest snapshot, re-rendered whenever it or the terminal bindings
+      // change (a binding can land after the snapshot, once the tracker has
+      // resolved terminal PIDs, or be lost when a terminal closes).
+      let latestChats: LiveChatMetadata[] = [];
+      const refresh = () =>
+        liveChats.update(latestChats, tracker.revealableChatIds());
+      context.subscriptions.push(tracker.onDidChange(refresh));
+
       // Subscribe to the server's push stream: it delivers the current
       // snapshot immediately and a fresh one on every change.
-      c.subscribeLiveChats((chats) => liveChats.update(chats));
+      c.subscribeLiveChats((chats) => {
+        latestChats = chats;
+        void tracker.ingest(chats).then(refresh);
+        refresh();
+      });
     })
     .catch((err) => {
       log.appendLine(

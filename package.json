@@ -90,6 +90,7 @@
     "vscode:prepublish": "npm run build:all",
     "build:ext": "node scripts/esbuild.mjs ext",
     "build:server": "node scripts/esbuild.mjs server",
+    "build:reporter": "node scripts/esbuild.mjs reporter",
     "build:all": "node scripts/esbuild.mjs all",
     "watch:ext": "node scripts/esbuild.mjs ext --watch",
     "watch:server": "node scripts/esbuild.mjs server --watch",

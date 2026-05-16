@@ -370,11 +370,12 @@ export async function getOrCreateServer(
   const version: string = context.extension.packageJSON.version ?? '0';
   const serverJs = context.asAbsolutePath('out/server.js');
 
-  // Connecting also registers the server as a Claude Code HTTP hook for this
+  // Connecting also registers the server's Claude Code hooks for this
   // workspace. registerHooks is fire-and-forget — it must never block or fail
   // the connect, so it is not awaited and swallows its own errors.
+  const outDir = context.asAbsolutePath('out');
   const connect = (): ServerClient => {
-    void registerHooks(folder.uri.fsPath, port, log);
+    void registerHooks(folder.uri.fsPath, port, outDir, log);
     return makeClient(port, groupKey, idleTimeoutMs, log);
   };
 
@@ -412,7 +413,7 @@ export async function getOrCreateServer(
     const poll = await pollConnect(port, groupKey, version, log);
     if (poll.kind === 'ready') {
       log.appendLine(`Takeshicc: connected to server on port ${port}.`);
-      return makeClient(port, groupKey, idleTimeoutMs, log);
+      return connect();
     }
     if (poll.kind === 'mismatch') {
       vscode.window.showErrorMessage(
