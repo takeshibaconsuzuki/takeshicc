@@ -134,16 +134,25 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-descriptionForeground);
     line-height: 1.4;
   }
-  .chat {
-    display: flex;
+  /* The chat list is a 3-column grid: state, title, mtime. Each row is a
+     subgrid spanning all three columns so cells line up across rows while the
+     row stays a single hover/click target. */
+  #root {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+  }
+  .row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
   }
-  .chat.revealable {
+  .row.revealable {
     cursor: pointer;
   }
-  .chat.revealable:hover {
+  .row.revealable:hover {
     background: var(--vscode-list-hoverBackground);
   }
   .dot {
@@ -151,25 +160,31 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--vscode-descriptionForeground);
-  }
-  .dot.busy {
     background: var(--vscode-charts-green, #89d185);
   }
-  .meta {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1 1 auto;
+  /* Busy: swap the green idle dot for a spinning ring. */
+  .dot.busy {
+    background: none;
+    box-sizing: border-box;
+    border: 2px solid var(--vscode-descriptionForeground);
+    border-top-color: transparent;
+    animation: spin 0.8s linear infinite;
   }
-  .label {
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .sub {
+  .mtime {
     color: var(--vscode-descriptionForeground);
     font-size: 0.9em;
+    white-space: nowrap;
+    text-align: right;
   }
 </style>
 </head>
@@ -202,9 +217,9 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
 
   function chatEl(chat, revealable) {
     const row = document.createElement('div');
-    row.className = revealable ? 'chat revealable' : 'chat';
+    row.className = revealable ? 'row revealable' : 'row';
 
-    // The row label is the chat's summary (its session title / summary / first
+    // The title cell is the chat's summary (its session title / summary / first
     // prompt), falling back to the raw id until the server resolves one. The
     // tooltip carries the full, untruncated label plus that raw id.
     const labelText = chat.summary || chat.chatId;
@@ -220,24 +235,23 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
       });
     }
 
+    // Column 1: state — a coloured idle dot or a busy spinner.
     const dot = document.createElement('span');
     dot.className = 'dot' + (chat.state === 'busy' ? ' busy' : '');
     row.appendChild(dot);
 
-    const meta = document.createElement('div');
-    meta.className = 'meta';
+    // Column 2: chat title.
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = labelText;
+    row.appendChild(title);
 
-    const label = document.createElement('span');
-    label.className = 'label';
-    label.textContent = labelText;
-    meta.appendChild(label);
+    // Column 3: mtime, rendered as a relative time.
+    const mtime = document.createElement('span');
+    mtime.className = 'mtime';
+    mtime.textContent = relTime(chat.mTime);
+    row.appendChild(mtime);
 
-    const sub = document.createElement('span');
-    sub.className = 'sub';
-    sub.textContent = chat.state + ' \\u00b7 ' + relTime(chat.mTime);
-    meta.appendChild(sub);
-
-    row.appendChild(meta);
     return row;
   }
 
