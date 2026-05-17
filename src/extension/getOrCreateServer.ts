@@ -124,7 +124,7 @@ function tryRegister(port: number, worktreePath: string, version: string): Promi
 function classify(
   result: RegisterResult & { kind: 'ok' },
   groupId: string,
-): { kind: 'ready'; instanceId: string } | { kind: 'mismatch'; mainWorktreePath: string } {
+): PollResult {
   return result.groupId === groupId
     ? { kind: 'ready', instanceId: result.instanceId }
     : { kind: 'mismatch', mainWorktreePath: result.mainWorktreePath };
