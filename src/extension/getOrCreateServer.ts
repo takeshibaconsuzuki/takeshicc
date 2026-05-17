@@ -12,8 +12,8 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { HOST, ROUTES } from '../server/protocol';
-import { CONFIG_PATH, lookupGroup, ResolvedGroup } from './config';
-import { resolveGitGroup } from './gitGroup';
+import { CONFIG_PATH, lookupGroup, ResolvedGroup } from '../common/config';
+import { resolveGitGroup } from '../common/gitGroup';
 
 const WHOAMI_TIMEOUT_MS = 1_000;
 const POLL_INITIAL_MS = 50;

@@ -1,4 +1,4 @@
-node_modules/
-out/
-.node/
 *.vsix
+.node*/
+node_modules*/
+out/

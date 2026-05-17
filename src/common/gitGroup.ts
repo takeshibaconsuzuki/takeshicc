@@ -4,7 +4,7 @@
 
 import * as path from 'path';
 import { execFile } from 'child_process';
-import * as vscode from 'vscode';
+import { Logger } from './logger';
 
 // Canonicalizes a filesystem path so config keys and resolved keys compare
 // exactly: path.resolve, normalize separators to '/', lowercase a Windows
@@ -32,7 +32,7 @@ function runGit(args: string[], cwd: string): Promise<{ stdout: string }> {
 // git not installed).
 export async function resolveGitGroup(
   workspaceFolderFsPath: string,
-  log: vscode.OutputChannel,
+  log: Logger,
 ): Promise<string | undefined> {
   // A single command: both info options print, on consecutive lines.
   // --path-format=absolute requires git >= 2.31.

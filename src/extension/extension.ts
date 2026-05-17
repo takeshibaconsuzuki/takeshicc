@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { applyLayout } from './applyLayout';
-import { openConfig } from './config';
+import { openConfig } from './openConfig';
 import { registerPasteFileRef } from './pasteFileRef';
 import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateServer';
 
