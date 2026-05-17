@@ -191,9 +191,16 @@ export async function activate(context: vscode.ExtensionContext) {
         dropOptimistic(chatId);
       }
     }),
+    // retainContextWhenHidden keeps the webview's DOM and JS context alive
+    // while the view is hidden (activity bar switched away), so coming back is
+    // instant — no HTML reload, no 'ready' round-trip, no re-render. The cached
+    // this.state already made data instant; this removes the rebuild cost. The
+    // trade-off is the hidden webview staying memory-resident, negligible for a
+    // small chat-list panel.
     vscode.window.registerWebviewViewProvider(
       LiveChatsViewProvider.viewType,
       liveChats,
+      { webviewOptions: { retainContextWhenHidden: true } },
     ),
     vscode.commands.registerCommand('takeshicc.applyLayout', () =>
       applyLayout(context),
