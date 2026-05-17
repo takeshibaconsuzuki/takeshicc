@@ -32,7 +32,13 @@ export interface ServerClient {
   // Subscribe to pushed live-chat snapshots from the server's /events SSE
   // stream. onUpdate fires with the full snapshot on connect and on every
   // change; the stream reconnects on its own and is torn down by close().
-  subscribeLiveChats(onUpdate: (chats: LiveChatMetadata[]) => void): void;
+  // tailLines is this window's `takeshicc.tailLines` setting, sent to the
+  // server as the desired chat-tail length. Calling this again replaces the
+  // prior subscription — that is how a settings change is applied live.
+  subscribeLiveChats(
+    onUpdate: (chats: LiveChatMetadata[]) => void,
+    tailLines: number,
+  ): void;
   // Fetch the past (non-live) chats for `dir` — a one-shot read of
   // GET /get-historical-chats. Rejects on any transport or server error.
   getHistoricalChats(dir: string): Promise<HistoricalChatMetadata[]>;
@@ -193,7 +199,11 @@ function streamLiveChats(
   port: number,
   onUpdate: (chats: LiveChatMetadata[]) => void,
   log: vscode.OutputChannel,
+  tailLines: number,
 ): { close(): void } {
+  const streamPath = `${ROUTES.subscribeLiveChats}?tail=${encodeURIComponent(
+    tailLines,
+  )}`;
   let closed = false;
   let req: http.ClientRequest | undefined;
   let reconnectTimer: NodeJS.Timeout | undefined;
@@ -228,7 +238,7 @@ function streamLiveChats(
       {
         host: HOST,
         port,
-        path: ROUTES.subscribeLiveChats,
+        path: streamPath,
         headers: { Accept: 'text/event-stream' },
       },
       (res) => {
@@ -318,9 +328,9 @@ function makeClient(
   return {
     port,
     groupKey,
-    subscribeLiveChats(onUpdate) {
+    subscribeLiveChats(onUpdate, tailLines) {
       sse?.close(); // a second call replaces the prior subscription
-      sse = streamLiveChats(port, onUpdate, log);
+      sse = streamLiveChats(port, onUpdate, log, tailLines);
     },
     getHistoricalChats(dir) {
       return new Promise<HistoricalChatMetadata[]>((resolve, reject) => {

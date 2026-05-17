@@ -5,6 +5,7 @@
 // fails with EADDRINUSE and this process exits(0) (the duplicate spawn is
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
+import * as fs from 'fs';
 import express from 'express';
 import { getSessionInfo, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -17,6 +18,20 @@ import {
 } from './protocol';
 
 const IDLE_CHECK_MS = 5_000;
+
+// Cadence of the summary+tail refresher. Each tick re-resolves every live
+// chat's summary and re-reads its transcript tail, pushing one snapshot if
+// anything changed. Skipped when no one is subscribed.
+const REFRESH_MS = 3_000;
+
+// Trailing bytes of a transcript the tail reader scans. Bounds the read on
+// arbitrarily long sessions; large enough to still hold the last text lines
+// after the (skipped) tool-use/result and thinking entries between them.
+const TAIL_BYTES = 256 * 1024;
+
+// Hard cap on a subscriber's requested tail length — bounds the snapshot
+// against a bogus ?tail= value.
+const TAIL_MAX = 200;
 
 // Cap on how many past chats GET /get-historical-chats returns — listSessions
 // is sorted newest-first, so this keeps the most recent ones.
@@ -60,8 +75,21 @@ const liveChats = new Map<string, LiveChatMetadata>();
 // and again on every change to the live set — this is the server-push channel.
 const sseClients = new Set<express.Response>();
 
-// The current live-chat set as a plain array — the payload of both
-// GET /get-live-chats and every /events push.
+// Per-subscriber requested tail length: the `?tail=` query param on
+// /subscribe-live-chats, which carries each window's `takeshicc.tailLines`
+// setting. The snapshot's `tail` is computed at the max across subscribers so
+// every window gets at least the lines it asked for (it slices to its own N).
+const tailWanted = new Map<express.Response, number>();
+function maxTailLines(): number {
+  let m = 0;
+  for (const v of tailWanted.values()) {
+    m = Math.max(m, v);
+  }
+  return m;
+}
+
+// The current live-chat set as a plain array — the payload of every
+// /subscribe-live-chats push.
 function chatSnapshot(): LiveChatMetadata[] {
   return [...liveChats.values()];
 }
@@ -76,48 +104,198 @@ function broadcastLiveChats(): void {
     try {
       res.write(payload);
     } catch {
-      // Write to a half-dead socket — drop it; its 'close' will also fire.
+      // Write to a half-dead socket — drop it from both maps (kept in lockstep,
+      // exactly as the 'close' handler does); its 'close' will also fire.
       sseClients.delete(res);
+      tailWanted.delete(res);
     }
   }
 }
 
-// chatIds with a getSessionInfo lookup in flight. One hook turn fires many
-// events; this guard keeps the same chat from being queried concurrently.
-const summaryInFlight = new Set<string>();
+// chatId -> the filesystem context the periodic refresher needs: the
+// session's cwd (points getSessionInfo straight at its project) and its
+// transcript JSONL path (read for the tail). Both ride in on the hook payload;
+// kept in this side map so neither inflates the broadcast snapshot. Dropped
+// when the chat ends.
+const chatCtx = new Map<string, { cwd?: string; transcriptPath?: string }>();
 
-// Resolve a chat's display label via the Claude Agent SDK and, if it changed,
-// store it on the chat and re-broadcast. getSessionInfo reads only the
-// session's JSONL transcript — no network, no `claude` process — and its
-// `summary` is the session's custom title, else its auto-generated summary,
-// else its first prompt. Best-effort and fully async: the hook response never
-// waits on it, and any failure is logged and swallowed.
-function refreshSummary(chatId: string, cwd: string | undefined): void {
-  if (summaryInFlight.has(chatId)) {
-    return;
+// Pull human-readable text out of one transcript JSONL entry: a user/assistant
+// message's string content, or its `text` blocks. Everything else (tool
+// use/results, thinking, snapshots, titles, mode markers) is skipped — `tail`
+// is the visible conversation, regardless of role or message count.
+function textLinesOf(entry: unknown): string[] {
+  const e = entry as { type?: unknown; message?: { content?: unknown } };
+  if (e?.type !== 'user' && e?.type !== 'assistant') {
+    return [];
   }
-  summaryInFlight.add(chatId);
-  // `dir` just points the lookup straight at the right project directory; with
-  // it omitted the SDK searches every project, which still works, only slower.
-  void getSessionInfo(chatId, cwd ? { dir: cwd } : undefined)
-    .then((info) => {
-      const summary = info?.summary;
-      const chat = liveChats.get(chatId);
-      // The chat may have ended while the lookup was in flight — drop the
-      // result rather than resurrect it. A missing/unchanged summary is a no-op.
-      if (!chat || !summary || chat.summary === summary) {
-        return;
+  const content = e.message?.content;
+  const texts: string[] = [];
+  if (typeof content === 'string') {
+    texts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      const b = block as { type?: unknown; text?: unknown };
+      if (b?.type === 'text' && typeof b.text === 'string') {
+        texts.push(b.text);
       }
-      liveChats.set(chatId, { ...chat, summary });
-      log(`chat ${chatId}: summary -> ${JSON.stringify(summary)}`);
-      broadcastLiveChats();
-    })
+    }
+  }
+  return texts
+    .join('\n')
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim() !== '');
+}
+
+// Last `n` text lines of a session's transcript. Reads only the trailing
+// TAIL_BYTES so the cost is bounded no matter how long the session is — a
+// window that starts mid-file just drops its (partial) first JSONL line.
+// Returns undefined on n<=0 or any error (missing/locked file) so the caller
+// keeps the previous tail rather than clobbering it with nothing.
+async function readTail(
+  p: string | undefined,
+  n: number,
+): Promise<string[] | undefined> {
+  if (!p || n <= 0) {
+    return undefined;
+  }
+  try {
+    const { size } = await fs.promises.stat(p);
+    const start = Math.max(0, size - TAIL_BYTES);
+    const fh = await fs.promises.open(p, 'r');
+    let text: string;
+    try {
+      const len = size - start;
+      const buf = Buffer.alloc(len);
+      // Decode only what was actually read: a short read (file rotated or
+      // truncated between stat and read — rare for an append-only JSONL) would
+      // otherwise leave zero-filled tail bytes that corrupt the last entry.
+      const { bytesRead } = await fh.read(buf, 0, len, start);
+      text = buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fh.close();
+    }
+    const rawLines = text.split('\n');
+    if (start > 0) {
+      rawLines.shift(); // a mid-file window's first line is partial JSON
+    }
+    const lines: string[] = [];
+    for (const raw of rawLines) {
+      const s = raw.trim();
+      if (!s) {
+        continue;
+      }
+      let entry: unknown;
+      try {
+        entry = JSON.parse(s);
+      } catch {
+        continue;
+      }
+      for (const line of textLinesOf(entry)) {
+        lines.push(line);
+      }
+    }
+    return lines.slice(-n);
+  } catch {
+    return undefined;
+  }
+}
+
+// The chat's display label via the Claude Agent SDK. getSessionInfo reads only
+// the session's JSONL transcript — no network, no `claude` process — and its
+// `summary` is the session's custom title, else its auto-generated summary,
+// else its first prompt. `dir` just points the lookup straight at the right
+// project (omitted, the SDK searches every project — slower but still works).
+// Best-effort: any failure is logged and resolves undefined, so the caller
+// keeps the prior summary.
+function resolveSummary(
+  chatId: string,
+  cwd: string | undefined,
+): Promise<string | undefined> {
+  return getSessionInfo(chatId, cwd ? { dir: cwd } : undefined)
+    .then((info) => info?.summary)
     .catch((err) => {
       log(`chat ${chatId}: getSessionInfo failed — ${(err as Error).message}`);
-    })
-    .finally(() => {
-      summaryInFlight.delete(chatId);
+      return undefined;
     });
+}
+
+function sameLines(
+  a: string[] | undefined,
+  b: string[] | undefined,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b || a.length !== b.length) {
+    return false;
+  }
+  return a.every((v, i) => v === b[i]);
+}
+
+// One refresh pass: re-resolve every live chat's summary and tail, then push a
+// single snapshot if anything changed.
+async function refreshPass(): Promise<void> {
+  const n = maxTailLines();
+  let changed = false;
+  for (const { chatId } of chatSnapshot()) {
+    const ctx = chatCtx.get(chatId);
+    const [summary, tail] = await Promise.all([
+      resolveSummary(chatId, ctx?.cwd),
+      readTail(ctx?.transcriptPath, n),
+    ]);
+    const cur = liveChats.get(chatId);
+    if (!cur) {
+      continue; // ended mid-refresh — do not resurrect it
+    }
+    const nextSummary = summary ?? cur.summary;
+    // n === 0 means every subscriber disabled the tail — drop it rather than
+    // leave the last one stale. Otherwise keep the prior tail on a read miss.
+    const nextTail = n <= 0 ? undefined : (tail ?? cur.tail);
+    if (nextSummary !== cur.summary || !sameLines(cur.tail, nextTail)) {
+      if (nextSummary !== cur.summary) {
+        log(`chat ${chatId}: summary -> ${JSON.stringify(nextSummary)}`);
+      }
+      liveChats.set(chatId, {
+        ...cur,
+        summary: nextSummary,
+        tail: nextTail,
+      });
+      changed = true;
+    }
+  }
+  if (changed) {
+    broadcastLiveChats();
+  }
+}
+
+// Periodic + on-demand refresher. Serialized by refreshInFlight so a slow disk
+// can never overlap passes. A call that arrives while a pass is running sets
+// refreshQueued so exactly one more pass runs after the current one finishes;
+// further calls coalesce into that single queued pass. That trailing re-run is
+// what lets an on-connect off-cycle refresh — which may have raised the max
+// tail — take effect right after the in-flight pass instead of waiting for the
+// next periodic tick. Skipped entirely when nothing is subscribed: nothing to
+// broadcast and no reason to touch disk.
+let refreshInFlight = false;
+let refreshQueued = false;
+async function refreshAllChats(): Promise<void> {
+  if (sseClients.size === 0) {
+    return;
+  }
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
+  try {
+    do {
+      refreshQueued = false;
+      await refreshPass();
+    } while (refreshQueued && sseClients.size > 0);
+  } finally {
+    refreshInFlight = false;
+  }
 }
 
 const app = express();
@@ -152,6 +330,7 @@ app.post(ROUTES.updateChatState, (req, res) => {
     session_id?: unknown;
     hook_event_name?: unknown;
     cwd?: unknown;
+    transcript_path?: unknown;
     ancestorPids?: unknown;
   };
   const chatId = body?.session_id;
@@ -161,15 +340,36 @@ app.post(ROUTES.updateChatState, (req, res) => {
     return;
   }
   const cwd = typeof body.cwd === 'string' ? body.cwd : undefined;
+  const transcriptPath =
+    typeof body.transcript_path === 'string' ? body.transcript_path : undefined;
 
   const existing = liveChats.get(chatId);
   const now = Date.now();
 
-  // Re-resolve the chat's summary when it has none yet, or at a turn boundary
-  // (UserPromptSubmit) — the cheapest schedule that still catches the first
-  // prompt, a later auto-generated summary, and a /rename. The in-flight guard
-  // makes a redundant call a no-op, so this never piles up under a busy turn.
-  const wantSummary = !existing?.summary || eventName === 'UserPromptSubmit';
+  // An unrecognized event means a hook fired, so the chat is doing something —
+  // 'busy' is the safe fallback.
+  const effect: HookEffect = HOOK_EFFECTS[eventName] ?? 'busy';
+
+  // A 'keep' event carries no run-state signal. For an untracked chat there is
+  // nothing to keep, so ignore it rather than invent a state — wait for an
+  // event that says idle/busy. Done before the chatCtx stash below so a 'keep'
+  // for a chat we decline to track leaves no orphaned context entry behind.
+  if (effect === 'keep' && !existing) {
+    log(`chat ${chatId}: ${eventName} -> ignored (untracked)`);
+    res.status(200).end();
+    return;
+  }
+
+  // Stash this chat's cwd/transcript path for the periodic refresher. Each is
+  // kept once known — a later event that omits one must not erase it. An 'end'
+  // event tears the chat down below, so there is nothing to refresh for it.
+  if (effect !== 'end') {
+    const prev = chatCtx.get(chatId);
+    chatCtx.set(chatId, {
+      cwd: cwd ?? prev?.cwd,
+      transcriptPath: transcriptPath ?? prev?.transcriptPath,
+    });
+  }
 
   // ancestorPids arrives only on the reporter hook's POST; every other event
   // omits it. An empty list (the reporter ran but resolved nothing) counts as
@@ -189,11 +389,8 @@ app.post(ROUTES.updateChatState, (req, res) => {
   }
   const ancestorPids = reportedPids ?? existing?.ancestorPids;
 
-  // An unrecognized event means a hook fired, so the chat is doing something —
-  // 'busy' is the safe fallback.
-  const effect: HookEffect = HOOK_EFFECTS[eventName] ?? 'busy';
-
   if (effect === 'end') {
+    chatCtx.delete(chatId);
     if (liveChats.delete(chatId)) {
       log(`chat ${chatId}: ${eventName} -> ended`);
       broadcastLiveChats();
@@ -201,26 +398,22 @@ app.post(ROUTES.updateChatState, (req, res) => {
       log(`chat ${chatId}: ${eventName} -> ignored (untracked)`);
     }
   } else if (effect === 'keep') {
-    // A 'keep' event carries no run-state signal. For a tracked chat it just
-    // refreshes liveness; for an untracked one there is no state to keep, so
-    // ignore it rather than invent one — wait for an event that says idle/busy.
-    if (!existing) {
-      log(`chat ${chatId}: ${eventName} -> ignored (untracked)`);
-      res.status(200).end();
-      return;
-    }
+    // The untracked 'keep' bailed above, so the chat is tracked here; the
+    // compound guard does not narrow `existing` for the type checker. A 'keep'
+    // only refreshes liveness, leaving the run state untouched.
+    const kept = existing as LiveChatMetadata;
     liveChats.set(chatId, {
       chatId,
-      state: existing.state,
+      state: kept.state,
       mTime: now,
       ancestorPids,
-      summary: existing.summary,
+      summary: kept.summary,
+      // Carry the periodic refresher's summary/tail through a state event so a
+      // mid-turn hook does not blank them until the next refresh tick.
+      tail: kept.tail,
     });
-    log(`chat ${chatId}: ${eventName} -> kept (${existing.state})`);
+    log(`chat ${chatId}: ${eventName} -> kept (${kept.state})`);
     broadcastLiveChats();
-    if (wantSummary) {
-      refreshSummary(chatId, cwd);
-    }
   } else {
     liveChats.set(chatId, {
       chatId,
@@ -228,20 +421,12 @@ app.post(ROUTES.updateChatState, (req, res) => {
       mTime: now,
       ancestorPids,
       summary: existing?.summary,
+      tail: existing?.tail,
     });
     log(`chat ${chatId}: ${eventName} -> ${effect}`);
     broadcastLiveChats();
-    if (wantSummary) {
-      refreshSummary(chatId, cwd);
-    }
   }
   res.status(200).end();
-});
-
-// /get-live-chats — synchronous snapshot of every tracked chat. The /events
-// stream below is the push equivalent; this remains as a one-shot/debug read.
-app.get(ROUTES.getLiveChats, (_req, res) => {
-  res.status(200).json(chatSnapshot());
 });
 
 // /get-historical-chats — past (non-live) chats for one worktree. The `?dir=`
@@ -275,23 +460,36 @@ app.get(ROUTES.getHistoricalChats, (req, res) => {
 // /subscribe-live-chats — Server-Sent Events stream of live-chat snapshots.
 // The current snapshot is sent immediately on connect, then a fresh snapshot
 // on every change to the live set (see broadcastLiveChats). This is the push
-// channel the extension subscribes to in place of polling /get-live-chats.
+// channel the extension subscribes to for live-chat state.
 app.get(ROUTES.subscribeLiveChats, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
   });
+  // The subscriber's desired tail length — its `takeshicc.tailLines` setting.
+  // Anything non-positive / non-integer / absent means "no tail"; cap the rest.
+  const reqTail = Number(req.query.tail);
+  const wantTail =
+    Number.isInteger(reqTail) && reqTail > 0 ? Math.min(reqTail, TAIL_MAX) : 0;
+
   // Flush each snapshot the instant it is written, without Nagle batching.
   req.socket.setNoDelay(true);
   sseClients.add(res);
-  log(`SSE client connected — ${sseClients.size} subscriber(s)`);
+  tailWanted.set(res, wantTail);
+  log(
+    `SSE client connected (tail=${wantTail}) — ${sseClients.size} subscriber(s)`,
+  );
 
-  // Initial snapshot so a fresh subscriber starts in sync.
+  // Initial snapshot so a fresh subscriber starts in sync. Its summary/tail may
+  // be stale (or short, if this subscriber raised the max), so kick an
+  // off-cycle refresh to fill them in promptly rather than at the next tick.
   res.write(`data: ${JSON.stringify(chatSnapshot())}\n\n`);
+  void refreshAllChats();
 
   req.on('close', () => {
     sseClients.delete(res);
+    tailWanted.delete(res);
     log(`SSE client disconnected — ${sseClients.size} subscriber(s)`);
   });
 });
@@ -317,6 +515,13 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   console.error(err);
   process.exit(1);
 });
+
+// Periodic summary+tail refresh. Self-guards on no subscribers and on an
+// in-flight tick, and never touches lastActivityAt — it must not by itself
+// keep an otherwise-idle server alive.
+setInterval(() => {
+  void refreshAllChats();
+}, REFRESH_MS).unref();
 
 // Idle self-shutdown. Always process.exit — exit is atomic (port fully bound
 // or fully free), avoiding a closed-but-alive split-brain window.

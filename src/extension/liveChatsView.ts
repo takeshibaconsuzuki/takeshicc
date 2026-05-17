@@ -181,9 +181,11 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-descriptionForeground);
     line-height: 1.4;
   }
-  /* A chat list is a 3-column grid: state, title, mtime. Each row is a subgrid
-     spanning all three columns so cells line up across rows while the row
-     stays a single hover/click target. */
+  /* A chat list is a 3-column grid: state, title+tail, mtime. Each row is a
+     subgrid spanning all three columns so cells line up across rows while the
+     row stays a single hover/click target. Rows are top-aligned: column 2 can
+     be multi-line (summary + tail), so the dot and mtime sit on its first
+     line (the summary) rather than floating against the whole block. */
   .chat-grid {
     display: grid;
     grid-template-columns: auto 1fr auto;
@@ -192,7 +194,7 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     display: grid;
     grid-column: 1 / -1;
     grid-template-columns: subgrid;
-    align-items: center;
+    align-items: start;
     gap: 8px;
     padding: 6px 12px;
   }
@@ -206,6 +208,9 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     flex: 0 0 auto;
     width: 8px;
     height: 8px;
+    /* Row is top-aligned; nudge the dot down to center it on the summary's
+       first line (line-height 1.4em, dot 8px). */
+    margin-top: calc(0.7em - 4px);
     border-radius: 50%;
     background: var(--vscode-charts-green, #89d185);
   }
@@ -228,7 +233,16 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
       transform: rotate(360deg);
     }
   }
+  /* Column 2: the summary with its tail stacked beneath. min-width:0 lets the
+     ellipsising children clip to the 1fr track instead of widening it. */
+  .cell {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
   .title {
+    display: block;
+    line-height: 1.4;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -236,8 +250,24 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   .mtime {
     color: var(--vscode-descriptionForeground);
     font-size: 0.9em;
+    line-height: 1.4;
     white-space: nowrap;
     text-align: right;
+  }
+  /* The tail preview: the server's last-N transcript text lines for a live
+     chat, stacked under the summary inside the title column. One ellipsised
+     line per entry keeps the block exactly N rows tall; clipping works because
+     the enclosing .cell is min-width:0. */
+  .tail {
+    margin-top: 2px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+    line-height: 1.35;
+  }
+  .tail-line {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>
 </head>
@@ -297,11 +327,29 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     dot.className = 'dot' + (chat.state === 'busy' ? ' busy' : '');
     row.appendChild(dot);
 
-    // Column 2: chat title.
+    // Column 2: the summary, with the server's recent-text tail stacked
+    // beneath it — one ellipsised line per entry. textContent (never
+    // innerHTML): transcript text is untrusted. The full, untruncated tail is
+    // appended to the row tooltip.
+    const cell = document.createElement('div');
+    cell.className = 'cell';
     const title = document.createElement('span');
     title.className = 'title';
     title.textContent = labelText;
-    row.appendChild(title);
+    cell.appendChild(title);
+    if (Array.isArray(chat.tail) && chat.tail.length) {
+      const tail = document.createElement('div');
+      tail.className = 'tail';
+      for (const line of chat.tail) {
+        const el = document.createElement('div');
+        el.className = 'tail-line';
+        el.textContent = line;
+        tail.appendChild(el);
+      }
+      cell.appendChild(tail);
+      row.title += '\\n\\n' + chat.tail.join('\\n');
+    }
+    row.appendChild(cell);
 
     // Column 3: mtime, rendered as a relative time.
     const mtime = document.createElement('span');
@@ -336,10 +384,13 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     dot.className = 'dot historical';
     row.appendChild(dot);
 
+    const cell = document.createElement('div');
+    cell.className = 'cell';
     const title = document.createElement('span');
     title.className = 'title';
     title.textContent = labelText;
-    row.appendChild(title);
+    cell.appendChild(title);
+    row.appendChild(cell);
 
     const mtime = document.createElement('span');
     mtime.className = 'mtime';

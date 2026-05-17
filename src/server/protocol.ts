@@ -8,9 +8,11 @@ export const ROUTES = {
   whoami: '/whoami',
   ping: '/ping',
   updateChatState: '/update-chat-state',
-  getLiveChats: '/get-live-chats',
   // Server-Sent Events stream: pushes the full LiveChatMetadata[] snapshot on
-  // connect and again on every change to the live set.
+  // connect and again on every change to the live set. Takes an optional
+  // `?tail=<n>` query param — the subscriber's desired tail length (its
+  // `takeshicc.tailLines` setting); the server resolves each chat's `tail` at
+  // the max n across all connected subscribers.
   subscribeLiveChats: '/subscribe-live-chats',
   // Synchronous read of past (non-live) chats for a given worktree. Takes a
   // `?dir=` query param and returns HistoricalChatMetadata[].
@@ -20,8 +22,8 @@ export const ROUTES = {
 // A Claude Code chat's run state, derived from its hook events.
 export type ChatState = 'idle' | 'busy';
 
-// One live Claude Code chat — the element type returned by GET /get-live-chats
-// and pushed (as a full array) over the /events SSE stream.
+// One live Claude Code chat — the element type pushed (as a full array) over
+// the /subscribe-live-chats SSE stream.
 export interface LiveChatMetadata {
   chatId: string;
   state: ChatState;
@@ -39,6 +41,15 @@ export interface LiveChatMetadata {
   // the Claude Agent SDK's getSessionInfo; absent until the first lookup for
   // this chat resolves (a brand-new session has no extractable summary yet).
   summary?: string;
+  // The last N text lines of the chat's transcript — visible user/assistant
+  // text only (string content and text blocks), regardless of role or message
+  // count. Refreshed by the server's periodic poll alongside `summary`. N is
+  // the subscriber's `takeshicc.tailLines` setting, passed as the `?tail=`
+  // query param on /subscribe-live-chats; the server reads at the max N across
+  // subscribers, so a window may receive more lines than it asked for and
+  // should slice to its own N. Absent until the first poll after some
+  // subscriber requested a non-zero N.
+  tail?: string[];
 }
 
 // One past Claude Code chat — the element type returned by
@@ -58,13 +69,15 @@ export interface HistoricalChatMetadata {
 
 // The subset of a Claude Code hook event payload the server relies on. Hooks
 // POST their full JSON payload; only these fields are read. session_id and
-// hook_event_name drive chat state; cwd is the session's working directory,
-// used to locate its transcript when resolving the summary; ancestorPids is
-// added by the reporter hook (see src/reporter) and carried through unchanged.
+// hook_event_name drive chat state; cwd is the session's working directory and
+// transcript_path its JSONL transcript file — both stashed so the periodic
+// refresher can resolve the summary and read the tail; ancestorPids is added
+// by the reporter hook (see src/reporter) and carried through unchanged.
 export interface HookEvent {
   session_id: string;
   hook_event_name: string;
   cwd?: string;
+  transcript_path?: string;
   ancestorPids?: number[];
 }
 

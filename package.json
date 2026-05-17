@@ -87,6 +87,13 @@
           "default": 300,
           "minimum": 0,
           "description": "Panel width in pixels (used when the panel is docked left/right). Written into the workspace state.vscdb when running 'Takeshicc: Apply Sidebar & Panel Widths'."
+        },
+        "takeshicc.tailLines": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "How many recent text lines of each live chat's transcript the server includes as the chat's tail. 0 disables the tail (the server skips reading transcripts). Takes effect on the next change without reloading."
         }
       }
     }

@@ -263,9 +263,7 @@ export async function activate(context: vscode.ExtensionContext) {
       // Starts null so the first snapshot always triggers the initial fetch.
       let liveSig: string | null = null;
 
-      // Subscribe to the server's push stream: it delivers the current
-      // snapshot immediately and a fresh one on every change.
-      c.subscribeLiveChats((chats) => {
+      const onSnapshot = (chats: LiveChatMetadata[]) => {
         latestChats = chats;
         // The server now owns any optimistic chat it reports — once it does,
         // the synthetic entry is no longer needed.
@@ -284,7 +282,32 @@ export async function activate(context: vscode.ExtensionContext) {
           liveSig = sig;
           fetchHistorical();
         }
-      });
+      };
+
+      // This window's desired chat-tail length, passed to the server on every
+      // (re)subscribe. Clamped to a non-negative integer; the package.json
+      // schema already bounds the value, this just hardens against a hand-edit.
+      const tailLines = (): number => {
+        const n = vscode.workspace
+          .getConfiguration('takeshicc')
+          .get<number>('tailLines', 3);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+      };
+
+      // Subscribe to the server's push stream: it delivers the current
+      // snapshot immediately and a fresh one on every change.
+      c.subscribeLiveChats(onSnapshot, tailLines());
+
+      // Re-subscribe when the tail-length setting changes so it applies live —
+      // subscribeLiveChats replaces the prior stream, and the server recomputes
+      // its tail at the new max across subscribers.
+      context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((e) => {
+          if (e.affectsConfiguration('takeshicc.tailLines')) {
+            c.subscribeLiveChats(onSnapshot, tailLines());
+          }
+        }),
+      );
     })
     .catch((err) => {
       log.appendLine(
