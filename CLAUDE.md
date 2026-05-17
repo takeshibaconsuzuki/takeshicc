@@ -1,13 +1,14 @@
 # takeshicc
 
-Bare-bones VS Code extension.
+Bare-bones VS Code extension. Also runs in Cursor (a VS Code fork).
 
 ## Environment
 
 Node is workspace-scoped at `.\.node\node.exe` (downloaded by
 `scripts\setup-node.ps1`). `.vscode\settings.json` prepends `.node\` to
 `PATH` for every integrated terminal, so `npm` and the build commands
-just work — no manual PATH setup needed when running in a VS Code terminal.
+just work — no manual PATH setup needed when running in a VS Code / Cursor
+terminal (Cursor reads `.vscode\settings.json` too).
 
 ## First-time setup
 
@@ -44,12 +45,19 @@ build:all` builds both bundles; `build:ext` / `build:server` build one.
 
 ## Native modules
 
-Native modules (`better-sqlite3`) must match VS Code's Electron ABI — plain
-Node prebuilts crash the Extension Host. `npm install`'s `postinstall` runs
-`scripts\rebuild.mjs`, which detects the installed VS Code's Electron version
-and rebuilds against it. Override detection with
-`TAKESHICC_ELECTRON_VERSION=<x.y.z>` (useful when `code` isn't on `PATH`).
-Requires a native C/C++ toolchain — MSVC / Xcode CLT / `build-essential`.
+Native modules (`better-sqlite3`) must match the host editor's Electron ABI —
+plain Node prebuilts crash the Extension Host. `npm install`'s `postinstall`
+runs `scripts\rebuild.mjs`, which detects the editor's Electron version and
+rebuilds against it. Detection order: `TAKESHICC_ELECTRON_VERSION=<x.y.z>`
+(explicit override) → the editor whose integrated terminal launched the
+rebuild (via the `VSCODE_GIT_ASKPASS_*` env vars VS Code/Cursor export) → the
+`code`/`cursor` CLI wrapper on `PATH`. From a resolved install the version
+comes from the macOS `.app` bundle's `Electron Framework` (packaged editors
+list no `electron` dep in any `package.json`), falling back to a `package.json`
+electron dep for source checkouts / non-mac layouts. Both VS Code and Cursor
+(a VS Code fork with its own Electron) are supported; when several editors are
+on `PATH`, set `TAKESHICC_EDITOR=code|cursor` to pick one. Requires a native
+C/C++ toolchain — MSVC / Xcode CLT / `build-essential`.
 
 ## Packaging
 
