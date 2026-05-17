@@ -22,6 +22,8 @@ import { resolveGitMetadata } from '../common/gitUtils';
 import { errMsg } from '../common/errMsg';
 
 const REGISTER_TIMEOUT_MS = 1_000;
+const HEARTBEAT_TIMEOUT_MS = 1_000;
+const HEARTBEAT_FAILURES_BEFORE_RECONNECT = 2;
 const POLL_INITIAL_MS = 50;
 const POLL_CAP_MS = 500;
 const POLL_DEADLINE_MS = 8_000;
@@ -31,6 +33,8 @@ export interface ServerClient {
   groupId: string;
   close(): void;
 }
+
+export type DeadConnectionHandler = (reason: string) => void;
 
 // Outcome of one /register attempt. `ok` mirrors RegisterResponse's
 // registered payload; the server already rejected a bad version as transient.
@@ -121,10 +125,7 @@ function tryRegister(port: number, worktreePath: string, version: string): Promi
 // process (mismatch). The server already rejected a stale build as transient,
 // so a registered response only needs its groupId matched against ours; a
 // mismatch carries the offending mainWorktreePath for a human-readable error.
-function classify(
-  result: RegisterResult & { kind: 'ok' },
-  groupId: string,
-): PollResult {
+function classify(result: RegisterResult & { kind: 'ok' }, groupId: string): PollResult {
   return result.groupId === groupId
     ? { kind: 'ready', instanceId: result.instanceId }
     : { kind: 'mismatch', mainWorktreePath: result.mainWorktreePath };
@@ -200,26 +201,72 @@ function makeClient(
   idleTimeoutMs: number,
   instanceId: string,
   log: vscode.OutputChannel,
+  onDeadConnection: DeadConnectionHandler,
 ): ServerClient {
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
   const heartbeatMs = Math.floor(idleTimeoutMs / 3);
   const pingPath = `${ROUTES.ping}?instanceId=${encodeURIComponent(instanceId)}`;
-  const timer = setInterval(() => {
+  let closed = false;
+  let failures = 0;
+
+  const close = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    clearInterval(timer);
+    agent.destroy();
+  };
+
+  const markFailed = (reason: string) => {
+    if (closed) {
+      return;
+    }
+    failures += 1;
+    log.appendLine(
+      `Takeshicc: heartbeat failed (${failures}/${HEARTBEAT_FAILURES_BEFORE_RECONNECT}) — ${reason}`,
+    );
+    if (failures >= HEARTBEAT_FAILURES_BEFORE_RECONNECT) {
+      close();
+      onDeadConnection(reason);
+      return;
+    }
+  };
+
+  function heartbeat(): void {
+    if (closed) {
+      return;
+    }
     const req = http.get({ host: HOST, port, path: pingPath, agent }, (res) => {
+      const statusCode = res.statusCode ?? 0;
+      res.on('end', () => {
+        if (closed) {
+          return;
+        }
+        if (statusCode >= 200 && statusCode < 300) {
+          failures = 0;
+        } else {
+          markFailed(`ping status ${statusCode}`);
+        }
+      });
       res.resume();
     });
-    req.on('error', (err) => {
-      log.appendLine(`Takeshicc: heartbeat failed — ${errMsg(err)}`);
+    req.setTimeout(HEARTBEAT_TIMEOUT_MS, () => {
+      req.destroy(new Error('heartbeat timeout'));
     });
+    req.on('error', (err) => {
+      markFailed(errMsg(err));
+    });
+  }
+
+  const timer = setInterval(() => {
+    heartbeat();
   }, heartbeatMs);
   timer.unref();
   return {
     port,
     groupId,
-    close() {
-      clearInterval(timer);
-      agent.destroy();
-    },
+    close,
   };
 }
 
@@ -270,6 +317,7 @@ function reportMismatch(port: number, otherGroup: string, mainWorktreePath: stri
 export async function getOrCreateServer(
   context: vscode.ExtensionContext,
   log: vscode.OutputChannel,
+  onDeadConnection: DeadConnectionHandler = () => {},
 ): Promise<ServerClient | undefined> {
   log.appendLine('Takeshicc: resolving server...');
 
@@ -320,7 +368,7 @@ export async function getOrCreateServer(
     const poll = await pollConnect(port, groupId, worktreePath, version, firstSample);
     if (poll.kind === 'ready') {
       log.appendLine(`Takeshicc: connected to server on port ${port}.`);
-      return makeClient(port, groupId, idleTimeoutMs, poll.instanceId, log);
+      return makeClient(port, groupId, idleTimeoutMs, poll.instanceId, log, onDeadConnection);
     }
     if (poll.kind === 'mismatch') {
       reportMismatch(port, poll.mainWorktreePath, mainWorktreePath);

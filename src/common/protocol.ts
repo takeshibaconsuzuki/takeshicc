@@ -7,7 +7,8 @@ export const HOST = '127.0.0.1';
 export const ROUTES = {
   register: '/register',
   // GET /ping?instanceId=<id> — the heartbeat. The id is the one the server
-  // handed back from /register; it refreshes that instance's liveness.
+  // handed back from /register; 2xx refreshes liveness, non-2xx means the
+  // client should reconnect.
   ping: '/ping',
 } as const;
 

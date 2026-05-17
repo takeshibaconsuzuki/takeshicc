@@ -105,13 +105,15 @@ app.post(ROUTES.register, (req, res) => {
 
 app.get(ROUTES.ping, (req, res) => {
   // Heartbeat — fires every idleTimeoutMs/3, so it is intentionally not
-  // logged. Refreshes the named instance's liveness; a ping for an unknown
-  // instance is a no-op (it must not resurrect a pruned/forgotten instance).
+  // logged. Refreshes the named instance's liveness; an unknown instance tells
+  // the client to reconnect/register again.
   const instanceId = typeof req.query.instanceId === 'string' ? req.query.instanceId : undefined;
   const inst = instanceId ? registry.get(instanceId) : undefined;
-  if (inst) {
-    inst.lastHeartbeatAt = Date.now();
+  if (!inst) {
+    res.status(410).send('gone');
+    return;
   }
+  inst.lastHeartbeatAt = Date.now();
   res.status(200).send('ok');
 });
 

@@ -6,8 +6,39 @@ import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateSer
 import { COMMANDS } from './commands';
 
 let serverClient: ServerClient | undefined;
+let reconnecting = false;
+let deactivated = false;
+
+function startServerSupervisor(context: vscode.ExtensionContext, log: vscode.OutputChannel): void {
+  const connect = async (reason: string) => {
+    if (deactivated || reconnecting) {
+      return;
+    }
+    reconnecting = true;
+    serverClient = undefined;
+    if (reason !== 'activation') {
+      log.appendLine(`Takeshicc: reconnecting to server after ${reason}.`);
+    }
+    try {
+      serverClient = await getOrCreateServer(context, log, (deadReason) => {
+        void connect(deadReason);
+      });
+    } catch (err) {
+      log.appendLine(
+        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+    } finally {
+      reconnecting = false;
+    }
+  };
+
+  // Do NOT await — getOrCreateServer may poll indefinitely and must never
+  // block activation.
+  void connect('activation');
+}
 
 export async function activate(context: vscode.ExtensionContext) {
+  deactivated = false;
   // Created before commands so the openServerLog handler can log through it.
   const log = vscode.window.createOutputChannel('Takeshicc');
   context.subscriptions.push(
@@ -22,19 +53,11 @@ export async function activate(context: vscode.ExtensionContext) {
     `Takeshicc: extension activated (v${context.extension.packageJSON.version ?? '?'}).`,
   );
 
-  // Do NOT await — getOrCreateServer loops forever and must never block activation.
-  void getOrCreateServer(context, log)
-    .then((c) => {
-      serverClient = c;
-    })
-    .catch((err) => {
-      log.appendLine(
-        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
-    });
+  startServerSupervisor(context, log);
 }
 
 export function deactivate() {
+  deactivated = true;
   // The server idle-exits on its own; close() just stops our heartbeat.
   serverClient?.close();
 }
