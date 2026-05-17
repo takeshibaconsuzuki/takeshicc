@@ -1,4 +1,4 @@
-import { CONFIG_PATH, TAKESHICC_DIR } from "../common/config";
+import { CONFIG_PATH, TAKESHICC_DIR } from '../common/config';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { errMsg } from '../common/errMsg';
@@ -22,8 +22,6 @@ export async function openConfig(): Promise<void> {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(CONFIG_PATH));
     await vscode.window.showTextDocument(doc);
   } catch (err) {
-    vscode.window.showErrorMessage(
-      `Takeshicc: could not open ${CONFIG_PATH} — ${errMsg(err)}`,
-    );
+    vscode.window.showErrorMessage(`Takeshicc: could not open ${CONFIG_PATH} — ${errMsg(err)}`);
   }
 }

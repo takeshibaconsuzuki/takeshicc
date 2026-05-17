@@ -48,31 +48,58 @@ system Node 20+; on Windows the pinned toolchain is bootstrapped by
 
 ## Server lifecycle & concurrency model
 
-- **Group identity.** `resolveGitGroup` maps a workspace folder to its repo's
-  canonical main-worktree path, so all linked worktrees share one server.
-  `canonicalizePath` must produce identical output in `gitGroup.ts` *and*
-  `config.ts`.
-- **Opt-in.** `~/.takeshicc/config.json` maps a group key to its
+- **Group identity.** `resolveGitMetadata` yields two canonical paths: the
+  repo's main-worktree path (shared by all linked worktrees → one server) and
+  *this* worktree's root (`--show-toplevel`, per-instance, subdirectory-proof).
+  It is the *sole* path canonicalizer (the only other `canonicalizePath` use
+  normalizes user-authored config keys in `lookupGroup`), so everything
+  carried by `GitMetadata`/`ResolvedGroup`/the wire is already canonical.
+  `groupIdFor`/`instanceIdFor` sha256 those paths into *namespaced* opaque
+  ids (`group:`/`instance:`) — the raw hash is private so a worktree that
+  *is* its main worktree can't collide its group and instance ids.
+  `lookupGroup` composes the one `ResolvedGroup` carrier downstream reads.
+  `groupId` is the routing token and the `/register` identity check (it
+  matches across processes only because client and server hash the same
+  canonical path); `mainWorktreePath` stays the config key and diagnostic.
+- **Opt-in.** `~/.takeshicc/config.json` maps a main-worktree path to its
   `{ port, idleTimeoutMs }`. Unless the workspace resolves to a configured git
   repo the feature stays silently off; only a malformed config surfaces an
   error.
 - **Port bind is the mutex.** `getOrCreateServer` loops forever converging:
-  probe `GET /whoami`; if refused, spawn a detached server, poll until ready.
-  Duplicate spawns are harmless (loser exits(0) on `EADDRINUSE`). A `/whoami`
-  with a different `groupKey` means another process owns the port → error, no
-  retry.
+  `POST /register` (announcing the worktree path + build version); if refused,
+  spawn a detached server, poll until it admits us. Duplicate spawns are
+  harmless (loser exits(0) on `EADDRINUSE`). A register answered with a
+  different `groupId` means another process owns the port → error, no retry
+  (the response also carries `mainWorktreePath` so that error names the
+  offending repo).
+- **Registry.** A successful `/register` admits the client into the server's
+  in-memory map keyed by `instanceId` (the `instance:…` id of the
+  canonicalized worktree path, server-derived and handed back so the client
+  echoes it on every heartbeat) — the seed for future message routing between
+  the VS Code instances sharing one server. A stale build or a worktree whose instance is
+  already registered is rejected as *transient*; the client keeps polling and
+  converges once the offending instance is pruned (freeing the slot to
+  re-register with the still-running shared server) or, if it was the sole
+  instance, the now-empty server idle-exits and the client respawns one.
 - **Spawned as plain Node** via `process.execPath` + `ELECTRON_RUN_AS_NODE=1`;
   logs to `~/.takeshicc/server-<port>.log`.
-- **Idle/heartbeat.** Server self-exits after `idleTimeoutMs` of no requests;
-  client pings `/ping` every `idleTimeoutMs/3` to keep a live one alive.
-  Version mismatch is logged, not fatal.
+- **Idle/heartbeat.** Per-instance liveness moves *only* on successful
+  register and `/ping?instanceId=…` (every `idleTimeoutMs/3`), never on a
+  rejected request. A periodic sweep prunes instances whose heartbeat lapsed
+  past `idleTimeoutMs` (3x the heartbeat, so a live one is never pruned mid-
+  flight); since survivors are therefore always fresh, the server exits
+  exactly when the registry is empty *and* it has outlived `idleTimeoutMs`
+  (so: no grace after the last disconnect; a never-registered server exits
+  `idleTimeoutMs` after spawn). Consequences: a client stuck polling
+  `/register` can't keep a doomed server alive, a co-tenant's death doesn't
+  disrupt the others, and reload / version-bump self-heals.
 
 ## Config invariants
 
 `config.json` is zod-validated in `src/common/config.ts`. The port and
 idle-timeout bounds are **duplicated in `server.ts`** and must stay in sync;
-the idle-timeout floor exists so a live client's heartbeat always outpaces the
-server's idle-exit check.
+the idle-timeout floor exists so a live client's heartbeat always outpaces
+both the server's idle-exit check and the stale-instance sweep.
 
 ## Commands
 

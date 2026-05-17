@@ -18,13 +18,13 @@ async function ensureSkipShell() {
     await config.update(
       'commandsToSkipShell',
       [...userValue, COMMAND_ID],
-      vscode.ConfigurationTarget.Global
+      vscode.ConfigurationTarget.Global,
     );
   } catch (err) {
     vscode.window.showWarningMessage(
       `Takeshicc: could not register Alt+K for the terminal — add "${COMMAND_ID}" ` +
         'to terminal.integrated.commandsToSkipShell manually. ' +
-        `(${errMsg(err)})`
+        `(${errMsg(err)})`,
     );
   }
 }
@@ -60,7 +60,7 @@ export function registerPasteFileRef(context: vscode.ExtensionContext) {
       }
       const selection = vscode.window.activeTextEditor
         ? editor.selection
-        : lastSelection ?? editor.selection;
+        : (lastSelection ?? editor.selection);
 
       const terminal = vscode.window.activeTerminal ?? vscode.window.terminals[0];
       if (!terminal) {
@@ -93,6 +93,6 @@ export function registerPasteFileRef(context: vscode.ExtensionContext) {
       // Trailing space, no newline — the user keeps typing their prompt.
       terminal.sendText(ref + ' ', false);
       terminal.show();
-    })
+    }),
   );
 }

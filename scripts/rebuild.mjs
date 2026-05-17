@@ -193,14 +193,14 @@ function detect() {
   if (!wrapper) {
     throw new Error(
       `Could not find ${names.map((n) => `'${n}'`).join(' or ')} on PATH. ` +
-        'Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.'
+        'Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.',
     );
   }
   const found = electronVersionFor(realpath(wrapper));
   if (!found) {
     throw new Error(
       `Found '${path.basename(wrapper)}' at ${wrapper} but could not determine its ` +
-        'Electron version. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.'
+        'Electron version. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.',
     );
   }
   return found;

@@ -1,0 +1,8 @@
+out
+node_modules
+.vscode-test
+*.vsix
+package-lock.json
+
+# Hand-wrapped prose (CLAUDE.md and friends) — keep the formatter to code only.
+*.md

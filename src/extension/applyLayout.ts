@@ -62,7 +62,7 @@ export async function applyLayout(context: vscode.ExtensionContext): Promise<voi
   const choice = await vscode.window.showInformationMessage(
     `Takeshicc: moved panel left and wrote ${updated.join(', ')} to state.vscdb. ` +
       `Quit ${vscode.env.appName} now — Reload Window will clobber the change.`,
-    'Quit'
+    'Quit',
   );
   if (choice === 'Quit') {
     await vscode.commands.executeCommand('workbench.action.quit');

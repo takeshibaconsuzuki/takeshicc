@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { z } from 'zod';
-import { canonicalizePath } from './gitGroup';
+import { canonicalizePath, groupIdFor, GitMetadata } from './gitUtils';
 
 export const TAKESHICC_DIR = path.join(os.homedir(), '.takeshicc');
 export const CONFIG_PATH = path.join(TAKESHICC_DIR, 'config.json');
@@ -31,7 +31,15 @@ const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
-export type ResolvedGroup = z.infer<typeof GroupSchema>; // { port, idleTimeoutMs }
+
+// The on-disk group enriched by lookupGroup into this workspace's full
+// resolved identity. mainWorktreePath stays the human-authored config key
+// and diagnostic; groupId is the opaque routing token.
+export type ResolvedGroup = z.infer<typeof GroupSchema> & {
+  groupId: string;
+  mainWorktreePath: string;
+  worktreePath: string;
+};
 
 // Reads CONFIG_PATH. Missing file -> defaults (the normal "feature off" state,
 // no notification). Malformed JSON / schema violation -> throws with zod's
@@ -50,15 +58,20 @@ export function readConfig(): Config {
   return ConfigSchema.parse(JSON.parse(raw));
 }
 
-// Canonicalizes the query key and every config key before matching, so config
-// keys and resolved group keys compare exactly. Defaults are already applied
-// by ConfigSchema.parse.
-export function lookupGroup(groupKey: string): ResolvedGroup | undefined {
+// Matches user-authored config keys (canonicalized) against the
+// already-canonical meta.mainWorktreePath, then enriches the hit into the
+// full resolved identity.
+export function lookupGroup(meta: GitMetadata): ResolvedGroup | undefined {
   const config = readConfig();
-  const wanted = canonicalizePath(groupKey);
+  const wanted = meta.mainWorktreePath; // already canonical (resolveGitMetadata)
   for (const [key, group] of Object.entries(config.groups)) {
     if (canonicalizePath(key) === wanted) {
-      return group;
+      return {
+        ...group,
+        groupId: groupIdFor(wanted),
+        mainWorktreePath: wanted,
+        worktreePath: meta.worktreePath,
+      };
     }
   }
   return undefined;

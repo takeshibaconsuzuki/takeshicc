@@ -1,8 +1,8 @@
 // Atomic getOrCreate for the per-repo HTTP server.
 //
 // Runs once on activation. Resolves the git group, looks it up in the config,
-// then loops forever converging on a single shared server: probe /whoami,
-// spawn a detached server process if none answers, poll until it is ready.
+// then loops forever converging on a single shared server: POST /register,
+// spawn a detached server process if none answers, poll until it admits us.
 // The OS port bind is the mutex — duplicate spawns are harmless.
 
 import * as http from 'http';
@@ -10,30 +10,38 @@ import * as fs from 'fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
-import { HOST, ROUTES } from '../common/protocol';
-import { CONFIG_PATH, TAKESHICC_DIR, lookupGroup, serverLogPath, ResolvedGroup } from '../common/config';
-import { resolveGitGroup } from '../common/gitGroup';
+import { HOST, ROUTES, RegisterRequest, RegisterResponse } from '../common/protocol';
+import {
+  CONFIG_PATH,
+  TAKESHICC_DIR,
+  lookupGroup,
+  serverLogPath,
+  ResolvedGroup,
+} from '../common/config';
+import { resolveGitMetadata } from '../common/gitUtils';
 import { errMsg } from '../common/errMsg';
 
-const WHOAMI_TIMEOUT_MS = 1_000;
+const REGISTER_TIMEOUT_MS = 1_000;
 const POLL_INITIAL_MS = 50;
 const POLL_CAP_MS = 500;
 const POLL_DEADLINE_MS = 8_000;
 
 export interface ServerClient {
   port: number;
-  groupKey: string;
+  groupId: string;
   close(): void;
 }
 
-type WhoamiResult =
-  | { kind: 'ok'; groupKey: string; version: string }
+// Outcome of one /register attempt. `ok` mirrors RegisterResponse's
+// registered payload; the server already rejected a bad version as transient.
+type RegisterResult =
+  | { kind: 'ok'; groupId: string; mainWorktreePath: string; instanceId: string }
   | { kind: 'refused' }
   | { kind: 'transient'; reason: string };
 
 type PollResult =
-  | { kind: 'ready' }
-  | { kind: 'mismatch'; groupKey: string }
+  | { kind: 'ready'; instanceId: string }
+  | { kind: 'mismatch'; mainWorktreePath: string }
   | { kind: 'deadline' };
 
 // ±25% jitter on a backoff delay.
@@ -41,21 +49,32 @@ function jitter(ms: number): number {
   return Math.round(ms * (0.75 + Math.random() * 0.5));
 }
 
-// GET /whoami. http.get's `timeout` only emits a 'timeout' event — it does not
-// abort the request — so the handler calls req.destroy() to avoid leaking a
-// socket on a slow / black-holing port.
-function tryWhoami(port: number): Promise<WhoamiResult> {
+// POST /register with a JSON body. http.request's `timeout` only emits a
+// 'timeout' event — it does not abort the request — so the handler calls
+// req.destroy() to avoid leaking a socket on a slow / black-holing port.
+function tryRegister(port: number, worktreePath: string, version: string): Promise<RegisterResult> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (r: WhoamiResult) => {
+    const done = (r: RegisterResult) => {
       if (settled) {
         return;
       }
       settled = true;
       resolve(r);
     };
-    const req = http.get(
-      { host: HOST, port, path: ROUTES.whoami, timeout: WHOAMI_TIMEOUT_MS },
+    const payload = JSON.stringify({ worktreePath, version } satisfies RegisterRequest);
+    const req = http.request(
+      {
+        host: HOST,
+        port,
+        path: ROUTES.register,
+        method: 'POST',
+        timeout: REGISTER_TIMEOUT_MS,
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
@@ -65,21 +84,26 @@ function tryWhoami(port: number): Promise<WhoamiResult> {
             return;
           }
           try {
-            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            done({
-              kind: 'ok',
-              groupKey: String(body.groupKey),
-              version: String(body.version),
-            });
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as RegisterResponse;
+            done(
+              body.status === 'registered'
+                ? {
+                    kind: 'ok',
+                    groupId: String(body.groupId),
+                    mainWorktreePath: String(body.mainWorktreePath),
+                    instanceId: String(body.instanceId),
+                  }
+                : { kind: 'transient', reason: String(body.reason) || 'transient' },
+            );
           } catch {
-            done({ kind: 'transient', reason: 'unparseable /whoami body' });
+            done({ kind: 'transient', reason: 'unparseable /register body' });
           }
         });
       },
     );
     req.on('timeout', () => {
       req.destroy();
-      done({ kind: 'transient', reason: 'whoami timeout' });
+      done({ kind: 'transient', reason: 'register timeout' });
     });
     req.on('error', (err) => {
       const code = (err as NodeJS.ErrnoException).code;
@@ -89,56 +113,50 @@ function tryWhoami(port: number): Promise<WhoamiResult> {
           : { kind: 'transient', reason: code ?? err.message },
       );
     });
+    req.end(payload);
   });
 }
 
-// Classifies an answered /whoami: ours (ready, warning if the build is stale)
-// or held by an unrelated process (mismatch). The single converger for both
-// the initial probe and the poll loop.
+// Classifies a successful register: ours (ready) or held by an unrelated
+// process (mismatch). The server already rejected a stale build as transient,
+// so a registered response only needs its groupId matched against ours; a
+// mismatch carries the offending mainWorktreePath for a human-readable error.
 function classify(
-  who: WhoamiResult & { kind: 'ok' },
-  groupKey: string,
-  version: string,
-  log: vscode.OutputChannel,
-): { kind: 'ready' } | { kind: 'mismatch'; groupKey: string } {
-  if (who.groupKey !== groupKey) {
-    return { kind: 'mismatch', groupKey: who.groupKey };
-  }
-  if (who.version !== version) {
-    log.appendLine(
-      `Takeshicc: connected to a stale server (server ${who.version}, ` +
-        `extension ${version}); it will be replaced after it idle-exits.`,
-    );
-  }
-  return { kind: 'ready' };
+  result: RegisterResult & { kind: 'ok' },
+  groupId: string,
+): { kind: 'ready'; instanceId: string } | { kind: 'mismatch'; mainWorktreePath: string } {
+  return result.groupId === groupId
+    ? { kind: 'ready', instanceId: result.instanceId }
+    : { kind: 'mismatch', mainWorktreePath: result.mainWorktreePath };
 }
 
-// Poll /whoami with jittered exponential backoff until it answers or the
-// deadline passes. `first` lets the caller seed the loop with an
-// already-obtained sample, avoiding a redundant immediate re-probe.
+// Re-POST /register with jittered exponential backoff until the server admits
+// us or the deadline passes. `first` lets the caller seed the loop with an
+// already-obtained sample, avoiding a redundant immediate re-probe. The loop
+// returns on the first non-transient answer, so exactly one register succeeds.
 async function pollConnect(
   port: number,
-  groupKey: string,
+  groupId: string,
+  worktreePath: string,
   version: string,
-  log: vscode.OutputChannel,
-  first?: WhoamiResult,
+  first?: RegisterResult,
 ): Promise<PollResult> {
   const deadline = Date.now() + POLL_DEADLINE_MS;
   let delay = POLL_INITIAL_MS;
-  let who = first;
+  let result = first;
   for (;;) {
-    if (!who) {
-      who = await tryWhoami(port);
+    if (!result) {
+      result = await tryRegister(port, worktreePath, version);
     }
-    if (who.kind === 'ok') {
-      return classify(who, groupKey, version, log);
+    if (result.kind === 'ok') {
+      return classify(result, groupId);
     }
     if (Date.now() >= deadline) {
       return { kind: 'deadline' };
     }
     await sleep(jitter(delay));
     delay = Math.min(delay * 2, POLL_CAP_MS);
-    who = undefined;
+    result = undefined;
   }
 }
 
@@ -148,7 +166,7 @@ async function pollConnect(
 function spawnServer(
   serverJs: string,
   port: number,
-  groupKey: string,
+  mainWorktreePath: string,
   idleTimeoutMs: number,
   version: string,
   log: vscode.OutputChannel,
@@ -158,7 +176,7 @@ function spawnServer(
   try {
     const child = spawn(
       process.execPath,
-      [serverJs, String(port), groupKey, String(idleTimeoutMs), version],
+      [serverJs, String(port), mainWorktreePath, String(idleTimeoutMs), version],
       {
         detached: true,
         stdio: ['ignore', fd, fd],
@@ -178,14 +196,16 @@ function spawnServer(
 // keeps the server from idle-exiting under a live client.
 function makeClient(
   port: number,
-  groupKey: string,
+  groupId: string,
   idleTimeoutMs: number,
+  instanceId: string,
   log: vscode.OutputChannel,
 ): ServerClient {
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
   const heartbeatMs = Math.floor(idleTimeoutMs / 3);
+  const pingPath = `${ROUTES.ping}?instanceId=${encodeURIComponent(instanceId)}`;
   const timer = setInterval(() => {
-    const req = http.get({ host: HOST, port, path: ROUTES.ping, agent }, (res) => {
+    const req = http.get({ host: HOST, port, path: pingPath, agent }, (res) => {
       res.resume();
     });
     req.on('error', (err) => {
@@ -195,7 +215,7 @@ function makeClient(
   timer.unref();
   return {
     port,
-    groupKey,
+    groupId,
     close() {
       clearInterval(timer);
       agent.destroy();
@@ -204,33 +224,34 @@ function makeClient(
 }
 
 type GroupResolution =
-  | { kind: 'ok'; groupKey: string; group: ResolvedGroup }
+  | { kind: 'ok'; group: ResolvedGroup }
   | { kind: 'no-folder' }
   | { kind: 'not-git' }
   | { kind: 'bad-config'; message: string }
-  | { kind: 'not-configured'; groupKey: string };
+  | { kind: 'not-configured'; mainWorktreePath: string };
 
-// Workspace folder -> git group -> config lookup. Returns a reason the callers
-// map to their own UI; resolveGitGroup logs the 'not-git' specifics itself.
+// Workspace folder -> git metadata -> config lookup. Returns a reason the
+// callers map to their own UI; resolveGitMetadata logs the 'not-git'
+// specifics itself.
 async function resolveConfiguredGroup(log: vscode.OutputChannel): Promise<GroupResolution> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
     return { kind: 'no-folder' };
   }
-  const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
-  if (!groupKey) {
+  const meta = await resolveGitMetadata(folder.uri.fsPath, log);
+  if (!meta) {
     return { kind: 'not-git' };
   }
   let group: ResolvedGroup | undefined;
   try {
-    group = lookupGroup(groupKey);
+    group = lookupGroup(meta);
   } catch (err) {
     return { kind: 'bad-config', message: errMsg(err) };
   }
   if (!group) {
-    return { kind: 'not-configured', groupKey };
+    return { kind: 'not-configured', mainWorktreePath: meta.mainWorktreePath };
   }
-  return { kind: 'ok', groupKey, group };
+  return { kind: 'ok', group };
 }
 
 function reportBadConfig(message: string, log: vscode.OutputChannel): void {
@@ -239,10 +260,10 @@ function reportBadConfig(message: string, log: vscode.OutputChannel): void {
   log.appendLine(line);
 }
 
-function reportMismatch(port: number, otherGroup: string, groupKey: string): void {
+function reportMismatch(port: number, otherGroup: string, mainWorktreePath: string): void {
   vscode.window.showErrorMessage(
     `Takeshicc: port ${port} is held by another process (group ` +
-      `"${otherGroup}", expected "${groupKey}"). Fix ${CONFIG_PATH}.`,
+      `"${otherGroup}", expected "${mainWorktreePath}"). Fix ${CONFIG_PATH}.`,
   );
 }
 
@@ -258,7 +279,7 @@ export async function getOrCreateServer(
     return undefined;
   }
   if (r.kind === 'not-git') {
-    return undefined; // resolveGitGroup already logged the specific reason
+    return undefined; // resolveGitMetadata already logged the specific reason
   }
   if (r.kind === 'bad-config') {
     reportBadConfig(r.message, log);
@@ -266,16 +287,16 @@ export async function getOrCreateServer(
   }
   if (r.kind === 'not-configured') {
     log.appendLine(
-      `Takeshicc: group "${r.groupKey}" not found in ${CONFIG_PATH} — server feature off. ` +
+      `Takeshicc: group "${r.mainWorktreePath}" not found in ${CONFIG_PATH} — server feature off. ` +
         `Add a "groups" entry for it to enable the server.`,
     );
     return undefined;
   }
 
-  const { groupKey, group } = r;
-  const { port, idleTimeoutMs } = group;
+  const { group } = r;
+  const { port, idleTimeoutMs, groupId, mainWorktreePath, worktreePath } = group;
   log.appendLine(
-    `Takeshicc: group "${groupKey}" -> port ${port}, idleTimeoutMs ${idleTimeoutMs}.`,
+    `Takeshicc: group "${mainWorktreePath}" -> port ${port}, idleTimeoutMs ${idleTimeoutMs}.`,
   );
   const version: string = context.extension.packageJSON.version ?? '0';
   const serverJs = context.asAbsolutePath('out/server.js');
@@ -283,32 +304,31 @@ export async function getOrCreateServer(
   // Loop forever; each iteration surfaces its own error notification, and the
   // ~8 s poll deadline paces them.
   for (;;) {
-    const who = await tryWhoami(port);
+    const result = await tryRegister(port, worktreePath, version);
 
     // refused -> spawn, then poll a fresh probe. transient/ok -> feed the
     // sample straight into pollConnect (ok resolves immediately; transient
     // backs off without an extra redundant probe).
-    let firstSample: WhoamiResult | undefined = who;
-    if (who.kind === 'refused') {
-      spawnServer(serverJs, port, groupKey, idleTimeoutMs, version, log);
+    let firstSample: RegisterResult | undefined = result;
+    if (result.kind === 'refused') {
+      spawnServer(serverJs, port, mainWorktreePath, idleTimeoutMs, version, log);
       firstSample = undefined;
-    } else if (who.kind === 'transient') {
-      log.appendLine(`Takeshicc: /whoami transient (${who.reason}); polling.`);
+    } else if (result.kind === 'transient') {
+      log.appendLine(`Takeshicc: /register transient (${result.reason}); polling.`);
     }
 
-    const poll = await pollConnect(port, groupKey, version, log, firstSample);
+    const poll = await pollConnect(port, groupId, worktreePath, version, firstSample);
     if (poll.kind === 'ready') {
       log.appendLine(`Takeshicc: connected to server on port ${port}.`);
-      return makeClient(port, groupKey, idleTimeoutMs, log);
+      return makeClient(port, groupId, idleTimeoutMs, poll.instanceId, log);
     }
     if (poll.kind === 'mismatch') {
-      reportMismatch(port, poll.groupKey, groupKey);
+      reportMismatch(port, poll.mainWorktreePath, mainWorktreePath);
       return undefined;
     }
     // Deadline exceeded — surface the server log and continue the loop.
     vscode.window.showErrorMessage(
-      `Takeshicc: server on port ${port} did not become ready; ` +
-        `see ${serverLogPath(port)}.`,
+      `Takeshicc: server on port ${port} did not become ready; ` + `see ${serverLogPath(port)}.`,
     );
   }
 }
@@ -333,7 +353,7 @@ export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
   }
   if (r.kind === 'not-configured') {
     vscode.window.showInformationMessage(
-      `Takeshicc: "${r.groupKey}" is not in ${CONFIG_PATH} — no server log.`,
+      `Takeshicc: "${r.mainWorktreePath}" is not in ${CONFIG_PATH} — no server log.`,
     );
     return;
   }

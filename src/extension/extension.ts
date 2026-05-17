@@ -14,7 +14,7 @@ export async function activate(context: vscode.ExtensionContext) {
     log,
     vscode.commands.registerCommand(COMMANDS.applyLayout, () => applyLayout(context)),
     vscode.commands.registerCommand(COMMANDS.openConfig, () => openConfig()),
-    vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(log))
+    vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(log)),
   );
   registerPasteFileRef(context);
 
@@ -29,7 +29,7 @@ export async function activate(context: vscode.ExtensionContext) {
     })
     .catch((err) => {
       log.appendLine(
-        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+        `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     });
 }
