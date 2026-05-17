@@ -152,6 +152,21 @@ export async function activate(context: vscode.ExtensionContext) {
         `Takeshicc: resuming historical chat ${chatId} in a new terminal.`,
       );
     },
+    // onNewChat — the New Chat button was pressed: open a terminal in the
+    // worktree and run `claude`. Unlike a resume, no optimistic/synthetic
+    // entry is created — the chat has no id yet and SessionStart is not
+    // reliably delivered. It surfaces on its own once the session's first
+    // UserPromptSubmit fires the reporter hook, whose ancestor PIDs let the
+    // tracker bind it to this terminal.
+    () => {
+      const terminal = vscode.window.createTerminal({
+        name: `claude`,
+        cwd: workspaceDir,
+      });
+      terminal.show();
+      terminal.sendText(`claude`);
+      log.appendLine('Takeshicc: started a new chat in a new terminal.');
+    },
   );
   context.subscriptions.push(
     log,

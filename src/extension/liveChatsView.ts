@@ -20,8 +20,9 @@ type ViewStatus = 'connecting' | 'off' | 'ready' | 'error';
 
 // The ext -> webview message contract. The webview replies with a single
 // { type: 'ready' } once its script has loaded and can receive state, a
-// { type: 'reveal', chatId } when a revealable live-chat row is clicked, and a
-// { type: 'resume', chatId } when a historical-chat row is clicked.
+// { type: 'reveal', chatId } when a revealable live-chat row is clicked, a
+// { type: 'resume', chatId } when a historical-chat row is clicked, and a
+// { type: 'newChat' } when the New Chat button is pressed.
 interface ViewState {
   status: ViewStatus;
   chats: LiveChatMetadata[];
@@ -53,7 +54,10 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   // revealable live-chat row, so the extension can focus that chat's terminal.
   // onResume: invoked with the chatId, display label and mtime of a clicked
   // historical-chat row, so the extension can spawn a terminal that resumes it
-  // and render it identically while it is optimistically live.
+  // and render it identically while it is optimistically live. onNewChat:
+  // invoked when the New Chat button is pressed, so the extension can spawn a
+  // fresh `claude` terminal — no synthetic row; it surfaces on its own once the
+  // session's first UserPromptSubmit hook binds it.
   constructor(
     private readonly log: vscode.OutputChannel,
     private readonly onReveal: (chatId: string) => void,
@@ -62,6 +66,7 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
       summary: string,
       mTime: number,
     ) => void,
+    private readonly onNewChat: () => void,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -88,6 +93,8 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
             typeof msg.summary === 'string' ? msg.summary : '',
             typeof msg.mTime === 'number' ? msg.mTime : Date.now(),
           );
+        } else if (msg?.type === 'newChat') {
+          this.onNewChat();
         }
       },
     );
@@ -161,6 +168,24 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-foreground);
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
+  }
+  /* The New Chat button sits above both chat sections, always visible. */
+  #toolbar {
+    padding: 8px 12px;
+  }
+  #new-chat {
+    width: 100%;
+    padding: 4px 12px;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 2px;
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-background);
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+  #new-chat:hover {
+    background: var(--vscode-button-hoverBackground);
   }
   .section-header {
     padding: 6px 12px;
@@ -272,6 +297,9 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
 </style>
 </head>
 <body>
+<div id="toolbar">
+  <button id="new-chat" type="button">New Chat</button>
+</div>
 <div id="live-header" class="section-header"></div>
 <div id="live-root" class="chat-grid"></div>
 <div id="hist-header" class="section-header"></div>
@@ -469,6 +497,10 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     renderLive(state);
     renderHistorical(state);
   }
+
+  document.getElementById('new-chat').addEventListener('click', function () {
+    vscode.postMessage({ type: 'newChat' });
+  });
 
   window.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'state') {
