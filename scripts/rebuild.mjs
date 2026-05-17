@@ -1,25 +1,35 @@
 import { rebuild } from '@electron/rebuild';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// CLI wrapper names we recognize, in preference order. VS Code installs
+// `code`; Cursor (a VS Code fork) installs `cursor`. If a machine has both,
+// `code` wins — override with TAKESHICC_ELECTRON_VERSION when that's wrong.
+const EDITOR_CLIS = ['code', 'cursor'];
 
 const PROJECT_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
 
-function findCodeOnPath() {
+function findEditorOnPath() {
   const PATH = process.env.PATH || '';
   const sep = process.platform === 'win32' ? ';' : ':';
   const exts = process.platform === 'win32' ? ['.cmd', '', '.exe'] : [''];
-  for (const rawDir of PATH.split(sep).filter(Boolean)) {
-    const dir = rawDir.replace(/^"|"$/g, '');
-    for (const ext of exts) {
-      const candidate = path.join(dir, 'code' + ext);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch {
-        // not present in this dir; keep looking
+  // Outer loop on CLI name so an earlier name (code) anywhere on PATH beats
+  // a later one (cursor), rather than letting PATH order decide.
+  for (const name of EDITOR_CLIS) {
+    for (const rawDir of PATH.split(sep).filter(Boolean)) {
+      const dir = rawDir.replace(/^"|"$/g, '');
+      for (const ext of exts) {
+        const candidate = path.join(dir, name + ext);
+        try {
+          if (fs.statSync(candidate).isFile()) return candidate;
+        } catch {
+          // not present in this dir; keep looking
+        }
       }
     }
   }
@@ -90,6 +100,57 @@ function findByScriptParse(scriptPath) {
   return null;
 }
 
+// macOS: the most reliable Electron version for a packaged editor is the
+// bundled framework's own version. VS Code's Microsoft build and Cursor both
+// strip `devDependencies.electron` from resources/app/package.json, so the
+// package.json walk below finds nothing for them — but `<App>.app/Contents/
+// Frameworks/Electron Framework.framework` always carries it. Walk up from the
+// resolved wrapper to the enclosing `.app`, then read the framework plist.
+function findElectronByMacBundle(start) {
+  if (process.platform !== 'darwin') return null;
+  let dir = path.dirname(start);
+  let appRoot = null;
+  for (let i = 0; i < 8; i++) {
+    if (dir.endsWith('.app')) {
+      appRoot = dir;
+      break;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (!appRoot) return null;
+  const fw = path.join(
+    appRoot,
+    'Contents',
+    'Frameworks',
+    'Electron Framework.framework',
+  );
+  for (const plist of [
+    path.join(fw, 'Resources', 'Info.plist'),
+    path.join(fw, 'Versions', 'A', 'Resources', 'Info.plist'),
+  ]) {
+    if (!fs.existsSync(plist)) continue;
+    // The Electron Framework stores its version in CFBundleVersion;
+    // CFBundleShortVersionString is absent on at least Cursor/VS Code. Try
+    // the short string first anyway in case a future build flips this.
+    for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+      try {
+        const v = execFileSync(
+          'plutil',
+          ['-extract', key, 'raw', '-o', '-', plist],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        ).trim();
+        if (/^\d+\.\d+\.\d+/.test(v))
+          return { version: v, source: `${plist} (${key})` };
+      } catch {
+        // plutil missing or key absent; try the next key/candidate
+      }
+    }
+  }
+  return null;
+}
+
 function readElectronVersion(pkgPath) {
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
   const v = pkg?.devDependencies?.electron ?? pkg?.dependencies?.electron;
@@ -103,10 +164,11 @@ function detect() {
       source: 'TAKESHICC_ELECTRON_VERSION env var',
     };
   }
-  const wrapper = findCodeOnPath();
+  const wrapper = findEditorOnPath();
   if (!wrapper) {
     throw new Error(
-      "Could not find 'code' on PATH. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.",
+      `Could not find ${EDITOR_CLIS.map((n) => `'${n}'`).join(' or ')} on ` +
+        'PATH. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.',
     );
   }
   let real;
@@ -115,11 +177,16 @@ function detect() {
   } catch {
     real = wrapper;
   }
+  // On macOS the bundled framework is authoritative and works for editors
+  // (Cursor, MS VS Code) whose package.json lacks an electron dep. Elsewhere,
+  // fall back to the package.json walk / launcher-script parse.
+  const byBundle = findElectronByMacBundle(real);
+  if (byBundle) return byBundle;
   const pkg = findByParentWalk(real) ?? findByScriptParse(real);
   if (!pkg) {
     throw new Error(
-      `Found 'code' at ${wrapper} but could not locate VS Code's package.json. ` +
-        'Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.',
+      `Found '${path.basename(wrapper)}' at ${wrapper} but could not locate ` +
+        "the editor's Electron version. Set TAKESHICC_ELECTRON_VERSION=<x.y.z>.",
     );
   }
   const version = readElectronVersion(pkg);

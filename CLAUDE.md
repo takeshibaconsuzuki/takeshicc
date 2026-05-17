@@ -4,30 +4,20 @@ Bare-bones VS Code extension.
 
 ## Environment
 
-Node is workspace-scoped. Install it with `scripts\setup-node.ps1` on
-Windows (into `.node.win\`, binary at `.node.win\node.exe`) or
-`scripts/setup-node.sh` on macOS/Linux (into `.node.posix/`, binary at
-`.node.posix/bin/node`) — separate directories so a shared checkout can hold
-both. Re-running either script after bumping the pinned version replaces the
-existing install in place. `.vscode\settings.json` prepends the right
-directory (`.node.win\` on Windows, `.node.posix/bin` on macOS/Linux) to
-`PATH` for every integrated terminal, so `npm` and the build commands just
-work — no manual PATH setup needed when running in a VS Code terminal.
+Node is workspace-scoped. Install it once per platform: `scripts\setup-node.ps1`
+on Windows (binary at `.node.win\node.exe`) or `scripts/setup-node.sh` on
+macOS/Linux (binary at `.node.posix/bin/node`). `.vscode/settings.json`
+prepends the right directory to `PATH` for VS Code integrated terminals, so
+`npm` and the build commands work there with no manual PATH setup.
 
 ## node_modules (per-platform)
 
-`node_modules` holds platform-specific native binaries — esbuild's prebuilt
-binary and `better-sqlite3`'s compiled, Electron-ABI-rebuilt addon — so it
-**cannot** be shared between Windows and macOS/Linux. Like Node itself, the
-install is kept per-platform. `node_modules` is always a real directory (npm
-will not install into a symlinked one) holding the running OS's install; the
-inactive OS's tree is parked alongside in `node_modules.win\` or
-`node_modules.posix/`. `scripts\link-modules.mjs` swaps these trees so
-`node_modules` always matches the current OS (renames within one filesystem,
-so it is instant). It runs automatically as npm's `preinstall` hook and again
-at the top of `scripts\esbuild.mjs`, so switching OS needs no manual step. Run
-`npm install` once per platform to populate that platform's tree — re-run only
-when dependencies change.
+`node_modules` holds platform-specific native binaries and **cannot** be shared
+between Windows and macOS/Linux. The inactive OS's tree is parked in
+`node_modules.win\` / `node_modules.posix/`; `scripts\link-modules.mjs` swaps
+them to match the current OS and runs automatically (npm `preinstall` hook and
+at the top of `scripts\esbuild.mjs`), so switching OS needs no manual step. Run
+`npm install` once per platform; re-run only when dependencies change.
 
 ## First-time setup
 
@@ -39,10 +29,10 @@ npm run build:all
 
 ## Develop
 
-- `F5` — launches the Extension Development Host (runs the `build:all` task first)
-- `npm run watch:ext` / `npm run watch:server` — incremental rebuilds in watch mode
+- `F5` — launches the Extension Development Host (runs `build:all` first)
+- `npm run watch:ext` / `npm run watch:server` — incremental rebuilds
 - Entry points: `src\extension\extension.ts` → `out\extension.js`,
-  `src\server\server.ts` → `out\server.js`, and
+  `src\server\server.ts` → `out\server.js`,
   `src\reporter\reporter.ts` → `out\reporter.js` (plus
   `src\reporter\reporter.ps1`, copied verbatim to `out\reporter.ps1`)
 
@@ -51,11 +41,10 @@ npm run build:all
 - `src\extension\` — runs in the VS Code extension host; may `import 'vscode'`.
 - `src\server\` — a standalone Node process; must **never** `import 'vscode'`.
 - `src\reporter\` — a short-lived Claude Code `UserPromptSubmit` command hook
-  that reports the Claude process's ancestor PIDs so the extension can bind a
-  live chat to the VS Code terminal hosting it. Two implementations: `.ps1`
-  (PowerShell) on Windows, `.ts` (plain Node, never `import 'vscode'`)
-  elsewhere — see registerHooks.ts for why the hook process itself must be a
-  walkable ancestor of the terminal.
+  reporting the Claude process's ancestor PIDs so the extension can bind a live
+  chat to the hosting VS Code terminal. `.ps1` (PowerShell) on Windows, `.ts`
+  (plain Node, never `import 'vscode'`) elsewhere — see registerHooks.ts for
+  why the hook process must be a walkable ancestor of the terminal.
 - `src\server\protocol.ts` — the vscode-free wire contract shared by all three.
 
 The extension talks to a per-repository local HTTP server, spawned on demand
@@ -65,22 +54,23 @@ and shared across windows. The repo→port mapping is a user-maintained file at
 ## Build
 
 esbuild (`scripts\esbuild.mjs`) bundles three self-contained CJS outputs:
-`out\extension.js`, `out\server.js`, and `out\reporter.js`. Type-checking is
-integrated into the build via `@jgoz/esbuild-plugin-typecheck` (runs `tsc` in a
-worker) — there is no separate typecheck step, and `tsconfig.json` sets
-`noEmit`. `npm run build:all` builds all three; `build:ext` / `build:server` /
-`build:reporter` build one.
+`out\extension.js`, `out\server.js`, `out\reporter.js`. Type-checking is
+integrated into the build via `@jgoz/esbuild-plugin-typecheck` — there is **no
+separate typecheck step**, and `tsconfig.json` sets `noEmit`. `npm run
+build:all` builds all three; `build:ext` / `build:server` / `build:reporter`
+build one.
 
 ## Native modules
 
-Native modules (`better-sqlite3`) must match VS Code's Electron ABI — plain
-Node prebuilts crash the Extension Host. `npm install`'s `postinstall` runs
-`scripts\rebuild.mjs`, which detects the installed VS Code's Electron version
-and rebuilds against it. Override detection with
-`TAKESHICC_ELECTRON_VERSION=<x.y.z>` (useful when `code` isn't on `PATH`).
-Requires a native C/C++ toolchain — MSVC / Xcode CLT / `build-essential`.
+`better-sqlite3` must match the editor's Electron ABI — plain Node prebuilts
+crash the Extension Host. `npm install`'s `postinstall` runs
+`scripts\rebuild.mjs`, which detects the editor's Electron version (looks for
+`code`, then `cursor`, on `PATH`) and rebuilds against it. Override with
+`TAKESHICC_ELECTRON_VERSION=<x.y.z>` when no editor CLI is on `PATH` or the
+wrong editor is picked. Requires a native C/C++ toolchain (MSVC / Xcode CLT /
+`build-essential`).
 
 ## Packaging
 
-`.vscodeignore` is an allowlist: everything is excluded by default and
-files that should ship in the `.vsix` are re-included with `!` patterns.
+`.vscodeignore` is an allowlist: everything is excluded by default; files that
+ship in the `.vsix` are re-included with `!` patterns.
