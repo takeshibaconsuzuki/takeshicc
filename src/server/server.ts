@@ -5,7 +5,6 @@
 // fails with EADDRINUSE and this process exits(0) (the duplicate spawn is
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
-import * as fs from 'fs';
 import express from 'express';
 import { getSessionInfo, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -16,6 +15,7 @@ import {
   LiveChatMetadata,
   ROUTES,
 } from './protocol';
+import { readTailFromFile } from './tail';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -23,11 +23,6 @@ const IDLE_CHECK_MS = 5_000;
 // chat's summary and re-reads its transcript tail, pushing one snapshot if
 // anything changed. Skipped when no one is subscribed.
 const REFRESH_MS = 3_000;
-
-// Trailing bytes of a transcript the tail reader scans. Bounds the read on
-// arbitrarily long sessions; large enough to still hold the last text lines
-// after the (skipped) tool-use/result and thinking entries between them.
-const TAIL_BYTES = 256 * 1024;
 
 // Hard cap on a subscriber's requested tail length — bounds the snapshot
 // against a bogus ?tail= value.
@@ -119,88 +114,6 @@ function broadcastLiveChats(): void {
 // when the chat ends.
 const chatCtx = new Map<string, { cwd?: string; transcriptPath?: string }>();
 
-// Pull human-readable text out of one transcript JSONL entry: a user/assistant
-// message's string content, or its `text` blocks. Everything else (tool
-// use/results, thinking, snapshots, titles, mode markers) is skipped — `tail`
-// is the visible conversation, regardless of role or message count.
-function textLinesOf(entry: unknown): string[] {
-  const e = entry as { type?: unknown; message?: { content?: unknown } };
-  if (e?.type !== 'user' && e?.type !== 'assistant') {
-    return [];
-  }
-  const content = e.message?.content;
-  const texts: string[] = [];
-  if (typeof content === 'string') {
-    texts.push(content);
-  } else if (Array.isArray(content)) {
-    for (const block of content) {
-      const b = block as { type?: unknown; text?: unknown };
-      if (b?.type === 'text' && typeof b.text === 'string') {
-        texts.push(b.text);
-      }
-    }
-  }
-  return texts
-    .join('\n')
-    .split('\n')
-    .map((l) => l.trimEnd())
-    .filter((l) => l.trim() !== '');
-}
-
-// Last `n` text lines of a session's transcript. Reads only the trailing
-// TAIL_BYTES so the cost is bounded no matter how long the session is — a
-// window that starts mid-file just drops its (partial) first JSONL line.
-// Returns undefined on n<=0 or any error (missing/locked file) so the caller
-// keeps the previous tail rather than clobbering it with nothing.
-async function readTail(
-  p: string | undefined,
-  n: number,
-): Promise<string[] | undefined> {
-  if (!p || n <= 0) {
-    return undefined;
-  }
-  try {
-    const { size } = await fs.promises.stat(p);
-    const start = Math.max(0, size - TAIL_BYTES);
-    const fh = await fs.promises.open(p, 'r');
-    let text: string;
-    try {
-      const len = size - start;
-      const buf = Buffer.alloc(len);
-      // Decode only what was actually read: a short read (file rotated or
-      // truncated between stat and read — rare for an append-only JSONL) would
-      // otherwise leave zero-filled tail bytes that corrupt the last entry.
-      const { bytesRead } = await fh.read(buf, 0, len, start);
-      text = buf.toString('utf8', 0, bytesRead);
-    } finally {
-      await fh.close();
-    }
-    const rawLines = text.split('\n');
-    if (start > 0) {
-      rawLines.shift(); // a mid-file window's first line is partial JSON
-    }
-    const lines: string[] = [];
-    for (const raw of rawLines) {
-      const s = raw.trim();
-      if (!s) {
-        continue;
-      }
-      let entry: unknown;
-      try {
-        entry = JSON.parse(s);
-      } catch {
-        continue;
-      }
-      for (const line of textLinesOf(entry)) {
-        lines.push(line);
-      }
-    }
-    return lines.slice(-n);
-  } catch {
-    return undefined;
-  }
-}
-
 // The chat's display label via the Claude Agent SDK. getSessionInfo reads only
 // the session's JSONL transcript — no network, no `claude` process — and its
 // `summary` is the session's custom title, else its auto-generated summary,
@@ -242,7 +155,7 @@ async function refreshPass(): Promise<void> {
     const ctx = chatCtx.get(chatId);
     const [summary, tail] = await Promise.all([
       resolveSummary(chatId, ctx?.cwd),
-      readTail(ctx?.transcriptPath, n),
+      readTailFromFile(ctx?.transcriptPath, n),
     ]);
     const cur = liveChats.get(chatId);
     if (!cur) {

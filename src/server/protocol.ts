@@ -65,6 +65,13 @@ export interface HistoricalChatMetadata {
   // and Claude Code's own resume picker.
   summary: string;
   mTime: number; // epoch ms of the session's last modification
+  // The last N text lines of the chat's transcript — same "visible
+  // conversation" extraction as LiveChatMetadata.tail. NOT supplied by the
+  // server: the extension client reads it once via the Claude Agent SDK
+  // (transcripts of past chats are immutable, so a single read suffices) and
+  // fills it in before rendering. Absent until that read completes, or when
+  // `takeshicc.tailLines` is 0.
+  tail?: string[];
 }
 
 // The subset of a Claude Code hook event payload the server relies on. Hooks

@@ -45,7 +45,6 @@ npm run build:all
   chat to the hosting VS Code terminal. `.ps1` (PowerShell) on Windows, `.ts`
   (plain Node, never `import 'vscode'`) elsewhere — see registerHooks.ts for
   why the hook process must be a walkable ancestor of the terminal.
-- `src\server\protocol.ts` — the vscode-free wire contract shared by all three.
 
 The extension talks to a per-repository local HTTP server, spawned on demand
 and shared across windows. The repo→port mapping is a user-maintained file at

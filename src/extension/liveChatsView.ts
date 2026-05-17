@@ -302,6 +302,33 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     return el;
   }
 
+  // Column 2: the summary, with the recent-text tail (if any) stacked beneath
+  // it — one ellipsised line per entry. textContent (never innerHTML):
+  // transcript text is untrusted. The full, untruncated tail is appended to
+  // the row tooltip. Shared by live rows (server-supplied tail) and historical
+  // rows (tail read client-side via the Claude Agent SDK).
+  function cellEl(row, labelText, tailArr) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = labelText;
+    cell.appendChild(title);
+    if (Array.isArray(tailArr) && tailArr.length) {
+      const tail = document.createElement('div');
+      tail.className = 'tail';
+      for (const line of tailArr) {
+        const el = document.createElement('div');
+        el.className = 'tail-line';
+        el.textContent = line;
+        tail.appendChild(el);
+      }
+      cell.appendChild(tail);
+      row.title += '\\n\\n' + tailArr.join('\\n');
+    }
+    return cell;
+  }
+
   function chatEl(chat, revealable) {
     const row = document.createElement('div');
     row.className = revealable ? 'row revealable' : 'row';
@@ -327,29 +354,8 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     dot.className = 'dot' + (chat.state === 'busy' ? ' busy' : '');
     row.appendChild(dot);
 
-    // Column 2: the summary, with the server's recent-text tail stacked
-    // beneath it — one ellipsised line per entry. textContent (never
-    // innerHTML): transcript text is untrusted. The full, untruncated tail is
-    // appended to the row tooltip.
-    const cell = document.createElement('div');
-    cell.className = 'cell';
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = labelText;
-    cell.appendChild(title);
-    if (Array.isArray(chat.tail) && chat.tail.length) {
-      const tail = document.createElement('div');
-      tail.className = 'tail';
-      for (const line of chat.tail) {
-        const el = document.createElement('div');
-        el.className = 'tail-line';
-        el.textContent = line;
-        tail.appendChild(el);
-      }
-      cell.appendChild(tail);
-      row.title += '\\n\\n' + chat.tail.join('\\n');
-    }
-    row.appendChild(cell);
+    // Column 2: summary + recent-text tail.
+    row.appendChild(cellEl(row, labelText, chat.tail));
 
     // Column 3: mtime, rendered as a relative time.
     const mtime = document.createElement('span');
@@ -384,13 +390,8 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
     dot.className = 'dot historical';
     row.appendChild(dot);
 
-    const cell = document.createElement('div');
-    cell.className = 'cell';
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = labelText;
-    cell.appendChild(title);
-    row.appendChild(cell);
+    // Column 2: summary + recent-text tail (read client-side via the SDK).
+    row.appendChild(cellEl(row, labelText, chat.tail));
 
     const mtime = document.createElement('span');
     mtime.className = 'mtime';

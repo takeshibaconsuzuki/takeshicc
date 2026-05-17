@@ -28,9 +28,23 @@ const shared = {
   sourcemap: true,
 };
 
+// The Claude Agent SDK is ESM and runs `createRequire(import.meta.url)` at
+// load time; esbuild leaves `import.meta.url` empty in a CJS bundle, which
+// crashes that call. Point it at the bundle's own file URL — createRequire
+// only needs a valid base path, and after bundling that is the outfile.
+// Applied to every bundle that imports the SDK: the server (live chats) and
+// the extension (historical-chat tails read client-side).
+const sdkCjsShim = {
+  define: { 'import.meta.url': '__importMetaUrl' },
+  banner: {
+    js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
+  },
+};
+
 const configs = {
   ext: {
     ...shared,
+    ...sdkCjsShim,
     entryPoints: ['src/extension/extension.ts'],
     outfile: 'out/extension.js',
     // The host provides `vscode`; a `.node` binary cannot be bundled.
@@ -38,17 +52,10 @@ const configs = {
   },
   server: {
     ...shared,
+    ...sdkCjsShim,
     entryPoints: ['src/server/server.ts'],
     outfile: 'out/server.js',
     external: [],
-    // The Claude Agent SDK is ESM and runs `createRequire(import.meta.url)` at
-    // load time; esbuild leaves `import.meta.url` empty in a CJS bundle, which
-    // crashes that call. Point it at the bundle's own file URL — createRequire
-    // only needs a valid base path, and after bundling that is out/server.js.
-    define: { 'import.meta.url': '__importMetaUrl' },
-    banner: {
-      js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
-    },
   },
   reporter: {
     ...shared,

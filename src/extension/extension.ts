@@ -11,6 +11,7 @@ import {
 import { LiveChatsViewProvider } from './liveChatsView';
 import { HistoricalChatMetadata, LiveChatMetadata } from '../server/protocol';
 import { TerminalTracker } from './terminalTracker';
+import { readHistoricalTail } from './historicalTail';
 
 // A resumed Claude Code session is launched as `claude --resume <id>` (also
 // `--resume=<id>` or `-r <id>`). parseResumeChatId pulls the session id out of
@@ -212,6 +213,12 @@ export async function activate(context: vscode.ExtensionContext) {
       // reconciled away before the resumed session's hooks land.
       const mergedLiveChats = (): LiveChatMetadata[] => {
         const reported = new Set(latestChats.map((x) => x.chatId));
+        // A resumed chat carries its client-read historical tail across the
+        // historical -> live transition: on the synthetic optimistic entry,
+        // and as a fallback for a server-reported chat that has no live tail
+        // yet (the server needs a hook event plus a poll cycle). The server's
+        // tail wins the moment it exists — for a just-resumed chat it reads
+        // the same transcript, so the content does not jump.
         const synthetic: LiveChatMetadata[] = [];
         for (const [chatId, entry] of optimistic) {
           if (!reported.has(chatId)) {
@@ -220,10 +227,16 @@ export async function activate(context: vscode.ExtensionContext) {
               state: 'idle',
               mTime: entry.mTime,
               summary: entry.summary,
+              tail: historicalTails.get(chatId),
             });
           }
         }
-        return [...latestChats, ...synthetic];
+        const reportedWithTail = latestChats.map((c) =>
+          c.tail === undefined && historicalTails.has(c.chatId)
+            ? { ...c, tail: historicalTails.get(c.chatId) }
+            : c,
+        );
+        return [...reportedWithTail, ...synthetic];
       };
 
       refresh = () => {
@@ -239,14 +252,61 @@ export async function activate(context: vscode.ExtensionContext) {
       };
       context.subscriptions.push(tracker.onDidChange(refresh));
 
-      // Fetch the worktree's past chats and re-render.
+      // This window's desired chat-tail length. Clamped to a non-negative
+      // integer; the package.json schema already bounds the value, this just
+      // hardens against a hand-edit. Used both for the live subscription
+      // (passed to the server) and for the historical tails read below.
+      const tailLines = (): number => {
+        const n = vscode.workspace
+          .getConfiguration('takeshicc')
+          .get<number>('tailLines', 3);
+        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+      };
+
+      // chatId -> its historical tail, read exactly once. Past transcripts are
+      // immutable, so a cached entry is never stale. Kept even after a chat is
+      // resumed (it leaves the historical list but the entry lingers) so
+      // mergedLiveChats can bridge its tail until the server's live tail lands.
+      // Cleared when `takeshicc.tailLines` changes so the new length applies.
+      const historicalTails = new Map<string, string[]>();
+
+      // Read — once — the tail of every historical chat not already cached,
+      // itself via the Claude Agent SDK (not the server). Sequential to keep
+      // the one-time disk cost gentle. Only populates the cache; rendering is
+      // the caller's job, deferred until this resolves so a historical row is
+      // never shown before its tail is ready.
+      const fillHistoricalTails = async (
+        chats: HistoricalChatMetadata[],
+      ): Promise<void> => {
+        const n = tailLines();
+        if (n <= 0) {
+          return;
+        }
+        for (const chat of chats) {
+          if (historicalTails.has(chat.chatId)) {
+            continue;
+          }
+          const t = await readHistoricalTail(chat.chatId, workspaceDir, n);
+          if (t && t.length) {
+            historicalTails.set(chat.chatId, t);
+          }
+        }
+      };
+
+      // Fetch the worktree's past chats, then reveal them only once their
+      // tails are loaded — the prior list stays visible until the new one is
+      // ready, so a row never flashes in without its description.
       const fetchHistorical = () => {
         if (!workspaceDir) {
           return;
         }
         c.getHistoricalChats(workspaceDir)
-          .then((historical) => {
-            latestHistorical = historical;
+          .then(async (historical) => {
+            await fillHistoricalTails(historical);
+            latestHistorical = historical.map((h) => ({
+              ...h,
+              tail: historicalTails.get(h.chatId),
+            }));
             refresh();
           })
           .catch((err) => {
@@ -284,16 +344,6 @@ export async function activate(context: vscode.ExtensionContext) {
         }
       };
 
-      // This window's desired chat-tail length, passed to the server on every
-      // (re)subscribe. Clamped to a non-negative integer; the package.json
-      // schema already bounds the value, this just hardens against a hand-edit.
-      const tailLines = (): number => {
-        const n = vscode.workspace
-          .getConfiguration('takeshicc')
-          .get<number>('tailLines', 3);
-        return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-      };
-
       // Subscribe to the server's push stream: it delivers the current
       // snapshot immediately and a fresh one on every change.
       c.subscribeLiveChats(onSnapshot, tailLines());
@@ -305,6 +355,11 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeConfiguration((e) => {
           if (e.affectsConfiguration('takeshicc.tailLines')) {
             c.subscribeLiveChats(onSnapshot, tailLines());
+            // Apply the new length to historical chats too: drop the cache so
+            // the next fetch re-reads each at the new N (consistent with the
+            // live re-subscribe above; still a one-shot, not a poll).
+            historicalTails.clear();
+            fetchHistorical();
           }
         }),
       );
