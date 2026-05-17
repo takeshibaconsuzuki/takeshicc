@@ -20,12 +20,12 @@ export function canonicalizePath(p: string): string {
   return resolved;
 }
 
-// sha256 hex of an already-canonical path (resolveGitMetadata is the sole
-// canonicalizer). Private: a bare hash collides across namespaces (a
+// Short sha256 hex of an already-canonical path (resolveGitMetadata is the
+// sole canonicalizer). Private: a bare hash collides across namespaces (a
 // main-worktree instance vs its group), so ids are minted only through the
 // namespaced helpers below.
 function pathId(p: string): string {
-  return crypto.createHash('sha256').update(p).digest('hex');
+  return crypto.createHash('sha256').update(p).digest('hex').slice(0, 12);
 }
 
 export function groupIdFor(mainWorktreePath: string): string {
@@ -34,13 +34,6 @@ export function groupIdFor(mainWorktreePath: string): string {
 
 export function instanceIdFor(worktreePath: string): string {
   return `instance:${pathId(worktreePath)}`;
-}
-
-// Log-friendly id: namespace prefix + 12 hex. Here because this module owns
-// the id format.
-export function shortId(id: string): string {
-  const colon = id.indexOf(':');
-  return colon === -1 ? id.slice(0, 12) : id.slice(0, colon + 13);
 }
 
 function runGit(args: string[], cwd: string): Promise<{ stdout: string }> {

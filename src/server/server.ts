@@ -9,7 +9,7 @@
 
 import express = require('express');
 import { HOST, ROUTES, RegisterRequest } from '../common/protocol';
-import { groupIdFor, instanceIdFor, shortId } from '../common/gitUtils';
+import { groupIdFor, instanceIdFor } from '../common/gitUtils';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -70,9 +70,7 @@ function sweepStaleInstances(): void {
   for (const [id, inst] of registry) {
     if (now - inst.lastHeartbeatAt > idleTimeoutMs) {
       registry.delete(id);
-      log(
-        `unregistered ${shortId(id)} (${inst.worktreePath}); heartbeat lapsed; ${registry.size} live`,
-      );
+      log(`unregistered ${id} (${inst.worktreePath}); heartbeat lapsed; ${registry.size} live`);
     }
   }
 }
@@ -101,7 +99,7 @@ app.post(ROUTES.register, (req, res) => {
     return;
   }
   registry.set(instanceId, { worktreePath, lastHeartbeatAt: Date.now() });
-  log(`registered ${shortId(instanceId)} (${worktreePath}); ${registry.size} live`);
+  log(`registered ${instanceId} (${worktreePath}); ${registry.size} live`);
   res.status(200).json({ status: 'registered', groupId, mainWorktreePath, instanceId });
 });
 
