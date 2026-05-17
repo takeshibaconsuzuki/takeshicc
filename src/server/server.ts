@@ -6,7 +6,7 @@
 // harmless). The server idle-exits after idleTimeoutMs with no requests.
 
 import express = require('express');
-import { HOST, ROUTES } from './protocol';
+import { HOST, ROUTES } from '../common/protocol';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -21,13 +21,15 @@ const groupKey = process.argv[3];
 const idleTimeoutMs = Number(process.argv[4]);
 const version = process.argv[5];
 
+// idleTimeoutMs floor mirrors config.ts GroupSchema (.min(5_000)): below
+// IDLE_CHECK_MS the heartbeat can't keep the server alive under a live client.
 if (
   !Number.isInteger(port) ||
   port < 1024 ||
   port > 65535 ||
   !groupKey ||
   !Number.isInteger(idleTimeoutMs) ||
-  idleTimeoutMs <= 0 ||
+  idleTimeoutMs < IDLE_CHECK_MS ||
   !version
 ) {
   console.error(

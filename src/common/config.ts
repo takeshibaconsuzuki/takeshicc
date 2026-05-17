@@ -8,7 +8,14 @@ import * as path from 'path';
 import { z } from 'zod';
 import { canonicalizePath } from './gitGroup';
 
-export const CONFIG_PATH = path.join(os.homedir(), '.takeshicc', 'config.json');
+export const TAKESHICC_DIR = path.join(os.homedir(), '.takeshicc');
+export const CONFIG_PATH = path.join(TAKESHICC_DIR, 'config.json');
+
+// Per-port server log under TAKESHICC_DIR: written by the detached server,
+// opened by the openServerLog command.
+export function serverLogPath(port: number): string {
+  return path.join(TAKESHICC_DIR, `server-${port}.log`);
+}
 
 const GroupSchema = z.object({
   // .min(1024): privileged ports fail to bind with EACCES (not EADDRINUSE),

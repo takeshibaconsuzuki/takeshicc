@@ -7,13 +7,13 @@
 
 import * as http from 'http';
 import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
-import { HOST, ROUTES } from '../server/protocol';
-import { CONFIG_PATH, lookupGroup, ResolvedGroup } from '../common/config';
+import { HOST, ROUTES } from '../common/protocol';
+import { CONFIG_PATH, TAKESHICC_DIR, lookupGroup, serverLogPath, ResolvedGroup } from '../common/config';
 import { resolveGitGroup } from '../common/gitGroup';
+import { errMsg } from '../common/errMsg';
 
 const WHOAMI_TIMEOUT_MS = 1_000;
 const POLL_INITIAL_MS = 50;
@@ -36,17 +36,9 @@ type PollResult =
   | { kind: 'mismatch'; groupKey: string }
   | { kind: 'deadline' };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ±25% jitter on a backoff delay.
 function jitter(ms: number): number {
   return Math.round(ms * (0.75 + Math.random() * 0.5));
-}
-
-function serverLogPath(port: number): string {
-  return path.join(os.homedir(), '.takeshicc', `server-${port}.log`);
 }
 
 // GET /whoami. http.get's `timeout` only emits a 'timeout' event — it does not
@@ -100,35 +92,53 @@ function tryWhoami(port: number): Promise<WhoamiResult> {
   });
 }
 
-// Poll /whoami with jittered exponential backoff until it matches our group
-// or the per-attempt deadline passes.
+// Classifies an answered /whoami: ours (ready, warning if the build is stale)
+// or held by an unrelated process (mismatch). The single converger for both
+// the initial probe and the poll loop.
+function classify(
+  who: WhoamiResult & { kind: 'ok' },
+  groupKey: string,
+  version: string,
+  log: vscode.OutputChannel,
+): { kind: 'ready' } | { kind: 'mismatch'; groupKey: string } {
+  if (who.groupKey !== groupKey) {
+    return { kind: 'mismatch', groupKey: who.groupKey };
+  }
+  if (who.version !== version) {
+    log.appendLine(
+      `Takeshicc: connected to a stale server (server ${who.version}, ` +
+        `extension ${version}); it will be replaced after it idle-exits.`,
+    );
+  }
+  return { kind: 'ready' };
+}
+
+// Poll /whoami with jittered exponential backoff until it answers or the
+// deadline passes. `first` lets the caller seed the loop with an
+// already-obtained sample, avoiding a redundant immediate re-probe.
 async function pollConnect(
   port: number,
   groupKey: string,
   version: string,
   log: vscode.OutputChannel,
+  first?: WhoamiResult,
 ): Promise<PollResult> {
   const deadline = Date.now() + POLL_DEADLINE_MS;
   let delay = POLL_INITIAL_MS;
+  let who = first;
   for (;;) {
-    const who = await tryWhoami(port);
+    if (!who) {
+      who = await tryWhoami(port);
+    }
     if (who.kind === 'ok') {
-      if (who.groupKey === groupKey) {
-        if (who.version !== version) {
-          log.appendLine(
-            `Takeshicc: connected to a stale server (server ${who.version}, ` +
-              `extension ${version}); it will be replaced after it idle-exits.`,
-          );
-        }
-        return { kind: 'ready' };
-      }
-      return { kind: 'mismatch', groupKey: who.groupKey };
+      return classify(who, groupKey, version, log);
     }
     if (Date.now() >= deadline) {
       return { kind: 'deadline' };
     }
     await sleep(jitter(delay));
     delay = Math.min(delay * 2, POLL_CAP_MS);
+    who = undefined;
   }
 }
 
@@ -143,9 +153,8 @@ function spawnServer(
   version: string,
   log: vscode.OutputChannel,
 ): void {
-  const logPath = serverLogPath(port);
-  fs.mkdirSync(path.dirname(logPath), { recursive: true });
-  const fd = fs.openSync(logPath, 'a');
+  fs.mkdirSync(TAKESHICC_DIR, { recursive: true });
+  const fd = fs.openSync(serverLogPath(port), 'a');
   try {
     const child = spawn(
       process.execPath,
@@ -180,7 +189,7 @@ function makeClient(
       res.resume();
     });
     req.on('error', (err) => {
-      log.appendLine(`Takeshicc: heartbeat failed — ${(err as Error).message}`);
+      log.appendLine(`Takeshicc: heartbeat failed — ${errMsg(err)}`);
     });
   }, heartbeatMs);
   timer.unref();
@@ -194,47 +203,76 @@ function makeClient(
   };
 }
 
+type GroupResolution =
+  | { kind: 'ok'; groupKey: string; group: ResolvedGroup }
+  | { kind: 'no-folder' }
+  | { kind: 'not-git' }
+  | { kind: 'bad-config'; message: string }
+  | { kind: 'not-configured'; groupKey: string };
+
+// Workspace folder -> git group -> config lookup. Returns a reason the callers
+// map to their own UI; resolveGitGroup logs the 'not-git' specifics itself.
+async function resolveConfiguredGroup(log: vscode.OutputChannel): Promise<GroupResolution> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    return { kind: 'no-folder' };
+  }
+  const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
+  if (!groupKey) {
+    return { kind: 'not-git' };
+  }
+  let group: ResolvedGroup | undefined;
+  try {
+    group = lookupGroup(groupKey);
+  } catch (err) {
+    return { kind: 'bad-config', message: errMsg(err) };
+  }
+  if (!group) {
+    return { kind: 'not-configured', groupKey };
+  }
+  return { kind: 'ok', groupKey, group };
+}
+
+function reportBadConfig(message: string, log: vscode.OutputChannel): void {
+  const line = `Takeshicc: invalid config at ${CONFIG_PATH} — ${message}`;
+  vscode.window.showErrorMessage(line);
+  log.appendLine(line);
+}
+
+function reportMismatch(port: number, otherGroup: string, groupKey: string): void {
+  vscode.window.showErrorMessage(
+    `Takeshicc: port ${port} is held by another process (group ` +
+      `"${otherGroup}", expected "${groupKey}"). Fix ${CONFIG_PATH}.`,
+  );
+}
+
 export async function getOrCreateServer(
   context: vscode.ExtensionContext,
   log: vscode.OutputChannel,
 ): Promise<ServerClient | undefined> {
   log.appendLine('Takeshicc: resolving server...');
 
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) {
+  const r = await resolveConfiguredGroup(log);
+  if (r.kind === 'no-folder') {
     log.appendLine('Takeshicc: no workspace folder open — server feature off.');
     return undefined;
   }
-
-  const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
-  if (!groupKey) {
-    // resolveGitGroup has already logged the specific reason.
+  if (r.kind === 'not-git') {
+    return undefined; // resolveGitGroup already logged the specific reason
+  }
+  if (r.kind === 'bad-config') {
+    reportBadConfig(r.message, log);
     return undefined;
   }
-
-  let group: ResolvedGroup | undefined;
-  try {
-    group = lookupGroup(groupKey);
-  } catch (err) {
-    vscode.window.showErrorMessage(
-      `Takeshicc: invalid config at ${CONFIG_PATH} — ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
+  if (r.kind === 'not-configured') {
     log.appendLine(
-      `Takeshicc: invalid config at ${CONFIG_PATH} — ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
-    return undefined;
-  }
-  if (!group) {
-    // Repo not configured — normal "feature off" state, no notification.
-    log.appendLine(
-      `Takeshicc: group "${groupKey}" not found in ${CONFIG_PATH} — server feature off. ` +
+      `Takeshicc: group "${r.groupKey}" not found in ${CONFIG_PATH} — server feature off. ` +
         `Add a "groups" entry for it to enable the server.`,
     );
     return undefined;
   }
 
+  const { groupKey, group } = r;
   const { port, idleTimeoutMs } = group;
   log.appendLine(
     `Takeshicc: group "${groupKey}" -> port ${port}, idleTimeoutMs ${idleTimeoutMs}.`,
@@ -247,42 +285,24 @@ export async function getOrCreateServer(
   for (;;) {
     const who = await tryWhoami(port);
 
-    if (who.kind === 'ok') {
-      if (who.groupKey === groupKey) {
-        if (who.version !== version) {
-          log.appendLine(
-            `Takeshicc: connected to a stale server (server ${who.version}, ` +
-              `extension ${version}); it will be replaced after it idle-exits.`,
-          );
-        }
-        log.appendLine(`Takeshicc: connected to server on port ${port}.`);
-        return makeClient(port, groupKey, idleTimeoutMs, log);
-      }
-      // Port owned by an unrelated process — config error: do not spawn, do
-      // not loop.
-      vscode.window.showErrorMessage(
-        `Takeshicc: port ${port} is held by another process (group ` +
-          `"${who.groupKey}", expected "${groupKey}"). Fix ${CONFIG_PATH}.`,
-      );
-      return undefined;
-    }
-
+    // refused -> spawn, then poll a fresh probe. transient/ok -> feed the
+    // sample straight into pollConnect (ok resolves immediately; transient
+    // backs off without an extra redundant probe).
+    let firstSample: WhoamiResult | undefined = who;
     if (who.kind === 'refused') {
       spawnServer(serverJs, port, groupKey, idleTimeoutMs, version, log);
-    } else {
+      firstSample = undefined;
+    } else if (who.kind === 'transient') {
       log.appendLine(`Takeshicc: /whoami transient (${who.reason}); polling.`);
     }
 
-    const poll = await pollConnect(port, groupKey, version, log);
+    const poll = await pollConnect(port, groupKey, version, log, firstSample);
     if (poll.kind === 'ready') {
       log.appendLine(`Takeshicc: connected to server on port ${port}.`);
       return makeClient(port, groupKey, idleTimeoutMs, log);
     }
     if (poll.kind === 'mismatch') {
-      vscode.window.showErrorMessage(
-        `Takeshicc: port ${port} is held by another process (group ` +
-          `"${poll.groupKey}", expected "${groupKey}"). Fix ${CONFIG_PATH}.`,
-      );
+      reportMismatch(port, poll.groupKey, groupKey);
       return undefined;
     }
     // Deadline exceeded — surface the server log and continue the loop.
@@ -296,38 +316,29 @@ export async function getOrCreateServer(
 // Command handler: opens the per-port server log for the current workspace's
 // configured group, or explains why there is none.
 export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) {
+  const r = await resolveConfiguredGroup(log);
+  if (r.kind === 'no-folder') {
     vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
     return;
   }
-
-  const groupKey = await resolveGitGroup(folder.uri.fsPath, log);
-  if (!groupKey) {
+  if (r.kind === 'not-git') {
     vscode.window.showInformationMessage(
       'Takeshicc: workspace is not a git repository — no server log.',
     );
     return;
   }
-
-  let group: ResolvedGroup | undefined;
-  try {
-    group = lookupGroup(groupKey);
-  } catch (err) {
-    vscode.window.showErrorMessage(
-      `Takeshicc: invalid config at ${CONFIG_PATH} — ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
+  if (r.kind === 'bad-config') {
+    reportBadConfig(r.message, log);
     return;
   }
-  if (!group) {
+  if (r.kind === 'not-configured') {
     vscode.window.showInformationMessage(
-      `Takeshicc: "${groupKey}" is not in ${CONFIG_PATH} — no server log.`,
+      `Takeshicc: "${r.groupKey}" is not in ${CONFIG_PATH} — no server log.`,
     );
     return;
   }
 
-  const logPath = serverLogPath(group.port);
+  const logPath = serverLogPath(r.group.port);
   if (!fs.existsSync(logPath)) {
     vscode.window.showInformationMessage(
       `Takeshicc: no server log at ${logPath} yet — the server has not been spawned.`,

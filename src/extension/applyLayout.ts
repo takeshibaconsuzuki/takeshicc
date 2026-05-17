@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import Database = require('better-sqlite3');
+import { errMsg } from '../common/errMsg';
 
 // VS Code keeps part sizes as discrete keys in the *global* state.vscdb,
 // stored as text. Sidebar/panel positions live in the workspace db and are
@@ -31,7 +32,7 @@ export async function applyLayout(context: vscode.ExtensionContext): Promise<voi
   try {
     db = new Database(dbPath);
   } catch (err) {
-    vscode.window.showErrorMessage(`Takeshicc: failed to open state.vscdb — ${(err as Error).message}`);
+    vscode.window.showErrorMessage(`Takeshicc: failed to open state.vscdb — ${errMsg(err)}`);
     return;
   }
 
@@ -47,7 +48,7 @@ export async function applyLayout(context: vscode.ExtensionContext): Promise<voi
       updated.push(`panel=${panelWidth}`);
     }
   } catch (err) {
-    vscode.window.showErrorMessage(`Takeshicc: write failed — ${(err as Error).message}`);
+    vscode.window.showErrorMessage(`Takeshicc: write failed — ${errMsg(err)}`);
     return;
   } finally {
     db.close();

@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
+import { COMMANDS } from './commands';
+import { errMsg } from '../common/errMsg';
 
-const COMMAND_ID = 'takeshicc.pasteFileRef';
+const COMMAND_ID = COMMANDS.pasteFileRef;
 
 // When the integrated terminal has focus, VS Code sends keystrokes straight to
 // the shell — workbench keybindings only fire if their command is listed in
@@ -22,7 +24,7 @@ async function ensureSkipShell() {
     vscode.window.showWarningMessage(
       `Takeshicc: could not register Alt+K for the terminal — add "${COMMAND_ID}" ` +
         'to terminal.integrated.commandsToSkipShell manually. ' +
-        `(${err instanceof Error ? err.message : String(err)})`
+        `(${errMsg(err)})`
     );
   }
 }

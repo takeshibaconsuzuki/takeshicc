@@ -3,6 +3,7 @@ import { applyLayout } from './applyLayout';
 import { openConfig } from './openConfig';
 import { registerPasteFileRef } from './pasteFileRef';
 import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateServer';
+import { COMMANDS } from './commands';
 
 let serverClient: ServerClient | undefined;
 
@@ -11,9 +12,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const log = vscode.window.createOutputChannel('Takeshicc');
   context.subscriptions.push(
     log,
-    vscode.commands.registerCommand('takeshicc.applyLayout', () => applyLayout(context)),
-    vscode.commands.registerCommand('takeshicc.openConfig', () => openConfig()),
-    vscode.commands.registerCommand('takeshicc.openServerLog', () => openServerLog(log))
+    vscode.commands.registerCommand(COMMANDS.applyLayout, () => applyLayout(context)),
+    vscode.commands.registerCommand(COMMANDS.openConfig, () => openConfig()),
+    vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(log))
   );
   registerPasteFileRef(context);
 

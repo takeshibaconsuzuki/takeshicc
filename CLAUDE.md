@@ -1,65 +1,102 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+**Writing documentation** (this file and any other docs or prose you produce
+in this repo — READMEs, design notes, doc comments): write for durability.
+Capture the high-level ideas, architecture, and rationale that stay true
+across refactors; omit implementation details that a reader can quickly
+recover from the code and that would need re-syncing whenever the code changes
+(the files in a directory, an exhaustive option list, the current shape of one
+module). Express each point at the level of the lasting concept, not a
+concrete instance that could be renamed or deleted without warning — but do
+name the command, script, or file a reader must run or open to act on, since
+that is an entry point, not churning detail. Lists are
+fine when their entries are themselves durable concepts; an enumeration that
+just mirrors today's code is the smell. When updating, rewrite and tighten in
+place rather than appending.
+
 # takeshicc
 
-Bare-bones VS Code extension. Also runs in Cursor (a VS Code fork).
-
-## Environment
-
-Node is workspace-scoped at `.\.node\node.exe` (downloaded by
-`scripts\setup-node.ps1`). `.vscode\settings.json` prepends `.node\` to
-`PATH` for every integrated terminal, so `npm` and the build commands
-just work — no manual PATH setup needed when running in a VS Code / Cursor
-terminal (Cursor reads `.vscode\settings.json` too).
-
-## First-time setup
-
-```powershell
-.\scripts\setup-node.ps1
-npm install
-npm run build:all
-```
-
-## Develop
-
-- `F5` — launches the Extension Development Host (runs the `build:all` task first)
-- `npm run watch:ext` / `npm run watch:server` — incremental rebuilds in watch mode
-- Entry points: `src\extension\extension.ts` → `out\extension.js` and
-  `src\server\server.ts` → `out\server.js`
-
-## Source layout
-
-- `src\extension\` — runs in the VS Code extension host; may `import 'vscode'`.
-- `src\server\` — a standalone Node process; must **never** `import 'vscode'`.
-- `src\server\protocol.ts` — the vscode-free wire contract shared by both sides.
-
-The extension talks to a per-repository local HTTP server, spawned on demand
-and shared across windows. The repo→port mapping is a user-maintained file at
-`~\.takeshicc\config.json`; without an entry the server feature stays off.
+A small VS Code extension (also runs in Cursor, a VS Code fork): a few
+editor-layout/terminal commands plus a per-repository local HTTP server.
 
 ## Build
 
-esbuild (`scripts\esbuild.mjs`) bundles two self-contained CJS outputs:
-`out\extension.js` and `out\server.js`. Type-checking is integrated into the
-build via `@jgoz/esbuild-plugin-typecheck` (runs `tsc` in a worker) — there is
-no separate typecheck step, and `tsconfig.json` sets `noEmit`. `npm run
-build:all` builds both bundles; `build:ext` / `build:server` build one.
+```
+npm install        # postinstall rebuilds native modules (see Native modules)
+npm run build:all  # or build:ext / build:server; watch:ext / watch:server
+npm run vsix       # package the .vsix
+npm run rebuild    # re-run the native-module ABI rebuild standalone
+```
+
+esbuild (`scripts/esbuild.mjs`) bundles each entry point into one CJS file
+under `out/`, leaving host-provided and native dependencies external.
+Type-checking runs *inside* every build (no separate typecheck step;
+`tsconfig.json` is `noEmit`); there is no test suite. On macOS/Linux use
+system Node 20+; on Windows the pinned toolchain is bootstrapped by
+`scripts/setup-node.ps1`.
+
+## Source layout
+
+- `src/extension/` — runs in the extension host; may `import 'vscode'`.
+  Entry: `extension.ts`.
+- `src/server/` — standalone Node process; must **never** `import 'vscode'`.
+  Entry: `server.ts`.
+- `src/common/` — vscode-free helpers shared by both sides (incl. the HTTP
+  wire contract); must bundle into both outputs.
+
+## Server lifecycle & concurrency model
+
+- **Group identity.** `resolveGitGroup` maps a workspace folder to its repo's
+  canonical main-worktree path, so all linked worktrees share one server.
+  `canonicalizePath` must produce identical output in `gitGroup.ts` *and*
+  `config.ts`.
+- **Opt-in.** `~/.takeshicc/config.json` maps a group key to its
+  `{ port, idleTimeoutMs }`. Unless the workspace resolves to a configured git
+  repo the feature stays silently off; only a malformed config surfaces an
+  error.
+- **Port bind is the mutex.** `getOrCreateServer` loops forever converging:
+  probe `GET /whoami`; if refused, spawn a detached server, poll until ready.
+  Duplicate spawns are harmless (loser exits(0) on `EADDRINUSE`). A `/whoami`
+  with a different `groupKey` means another process owns the port → error, no
+  retry.
+- **Spawned as plain Node** via `process.execPath` + `ELECTRON_RUN_AS_NODE=1`;
+  logs to `~/.takeshicc/server-<port>.log`.
+- **Idle/heartbeat.** Server self-exits after `idleTimeoutMs` of no requests;
+  client pings `/ping` every `idleTimeoutMs/3` to keep a live one alive.
+  Version mismatch is logged, not fatal.
+
+## Config invariants
+
+`config.json` is zod-validated in `src/common/config.ts`. The port and
+idle-timeout bounds are **duplicated in `server.ts`** and must stay in sync;
+the idle-timeout floor exists so a live client's heartbeat always outpaces the
+server's idle-exit check.
+
+## Commands
+
+IDs in `src/extension/commands.ts` **must stay in sync** with
+`contributes.commands` in `package.json`.
+
+- `applyLayout` — writes `workbench.sideBar.size`/`workbench.panel.size`
+  directly into VS Code's *global* `state.vscdb` (a SQLite file — this is why
+  a native module is needed). Requires quitting the editor after; Reload
+  Window clobbers it.
+- `pasteFileRef` (Alt+K) — pastes a Claude Code at-reference
+  (`@<rel-path>#L<start>-<end>`) for the editor selection into the terminal;
+  self-registers in `terminal.integrated.commandsToSkipShell`.
+- `openConfig` / `openServerLog` — open the config file / per-port server log.
 
 ## Native modules
 
-Native modules (`better-sqlite3`) must match the host editor's Electron ABI —
-plain Node prebuilts crash the Extension Host. `npm install`'s `postinstall`
-runs `scripts\rebuild.mjs`, which detects the editor's Electron version and
-rebuilds against it. Detection order: `TAKESHICC_ELECTRON_VERSION=<x.y.z>`
-(explicit override) → the editor whose integrated terminal launched the
-rebuild (via the `VSCODE_GIT_ASKPASS_*` env vars VS Code/Cursor export) → the
-`code`/`cursor` CLI wrapper on `PATH`. From a resolved install the version
-comes from the macOS `.app` bundle's `Electron Framework` (packaged editors
-list no `electron` dep in any `package.json`), falling back to a `package.json`
-electron dep for source checkouts / non-mac layouts. Both VS Code and Cursor
-(a VS Code fork with its own Electron) are supported; when several editors are
-on `PATH`, set `TAKESHICC_EDITOR=code|cursor` to pick one. Requires a native
-C/C++ toolchain — MSVC / Xcode CLT / `build-essential`.
+Native modules must match the host editor's Electron ABI (plain Node
+prebuilts crash the Extension Host). `postinstall` runs `scripts/rebuild.mjs`,
+which detects the editor's Electron version and rebuilds. Overrides:
+`TAKESHICC_ELECTRON_VERSION=<x.y.z>`; `TAKESHICC_EDITOR=code|cursor`. Needs a
+native C/C++ toolchain.
 
 ## Packaging
 
-`.vscodeignore` is an allowlist: everything is excluded by default and
-files that should ship in the `.vsix` are re-included with `!` patterns.
+`.vscodeignore` is an allowlist — everything is excluded by default; shipped
+files (incl. the native module's runtime files) are re-included with `!`.
