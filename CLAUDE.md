@@ -93,11 +93,34 @@ bootstrapped by `scripts/setup-node.ps1`.
   rejected request. A periodic sweep prunes instances whose heartbeat lapsed
   past `idleTimeoutMs` (3x the heartbeat, so a live one is never pruned mid-
   flight); since survivors are therefore always fresh, the server exits
-  exactly when the registry is empty *and* it has outlived `idleTimeoutMs`
-  (so: no grace after the last disconnect; a never-registered server exits
-  `idleTimeoutMs` after spawn). Consequences: a client stuck polling
-  `/register` can't keep a doomed server alive, a co-tenant's death doesn't
-  disrupt the others, and reload / version-bump self-heals.
+  exactly when the registry is empty, no in-flight job is outstanding
+  (`activeServerJobs`), *and* it has outlived
+  `idleTimeoutMs` (so: no grace after the last disconnect; a never-registered
+  server exits `idleTimeoutMs` after spawn). Consequences: a client stuck
+  polling `/register` can't keep a doomed server alive, a co-tenant's death
+  doesn't disrupt the others, and reload / version-bump self-heals.
+- **Worktree creation is a background job.** `POST /create-worktree`
+  validates, registers a job, and returns its id *immediately*; the server
+  then runs `git worktree add` and the optional user bootstrap command to
+  completion regardless of whether the requester is still connected. Active
+  jobs are tracked *parallel to the instance registry* — present while
+  running, dropped the moment they finish (no retention) — and each carries
+  the worktree path it will produce. `GET /worktreeJobs` is a single SSE
+  stream spanning all jobs: a subscriber gets a snapshot of the active jobs
+  on connect, then per job a `created` once `git worktree add` lands the
+  worktree on disk and a `done` (ok / failed) when the whole job finishes.
+  The worktree path rides every frame so *all* windows list the new worktree
+  the instant it exists and flag it in-progress (a spinner) until its
+  bootstrap finishes, converging regardless of which window initiated it.
+  Bootstrap *output* is still not streamed — it goes to the server log,
+  which a failure notification offers to open. A reconnecting subscriber
+  resumes from the snapshot (the authoritative in-flight set); a job that
+  finished while it was disconnected is simply absent (the worktree-list
+  refresh covers that). A stream subscriber deliberately does *not* keep the
+  server alive (a watching window is already covered by its instance
+  heartbeat); only the in-flight job does, via `activeServerJobs`, so the one
+  bound on a runaway bootstrap is its timeout. This decouples a
+  possibly-minutes-long bootstrap from any single window's lifetime.
 
 ## Config invariants
 
@@ -114,12 +137,15 @@ stay in sync** with `contributes.commands` / `contributes.views` in
 
 - **Worktrees view** (`src/extension/worktreesView.ts`) — the primary UI: a
   webview in the activity-bar sidebar that lists the repo's git worktrees,
-  creates new ones (`git worktree add`), and opens one in a new window.
-  Worktrees with a live VS Code window are flagged by cross-referencing the
-  server's `/instances` snapshot through `ServerClient`. The view is a
-  self-contained HTML/CSS/JS string with a strict CSP; the host side only
-  shells out to `git` and posts state — keep the wire `*Message` types and
-  the message handlers as the contract between the two halves.
+  creates new ones (delegated to the server's background-job + SSE flow
+  above — the worktree is listed as soon as it exists on disk and shows a
+  spinner until its bootstrap finishes), and opens one in a new
+  window. Worktrees with a live VS Code window are flagged by
+  cross-referencing the server's `/instances` snapshot through
+  `ServerClient`. The view is a self-contained HTML/CSS/JS string with a
+  strict CSP; the host side shells out to `git` only for the read-only
+  list/branch queries and otherwise posts state — keep the wire `*Message`
+  types and the message handlers as the contract between the two halves.
 - `applyLayout` — writes `workbench.sideBar.size`/`workbench.panel.size`
   directly into VS Code's *global* `state.vscdb` (a SQLite file — this is why
   a native module is needed). Requires quitting the editor after; Reload

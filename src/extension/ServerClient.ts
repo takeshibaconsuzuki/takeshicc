@@ -1,13 +1,29 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
-import { HOST, InstancesResponse, ROUTES } from '../common/protocol';
+import {
+  CreateWorktreeRequest,
+  CreateWorktreeResponse,
+  HOST,
+  InstancesResponse,
+  ROUTES,
+  WorktreeJobsMessage,
+} from '../common/protocol';
+import { lineSplitter } from '../common/lineSplitter';
 import { errMsg } from '../common/errMsg';
 
 const HEARTBEAT_TIMEOUT_MS = 1_000;
 const INSTANCES_TIMEOUT_MS = 1_000;
+const CREATE_WORKTREE_TIMEOUT_MS = 5_000;
 
 // Contract: implementations must clean up before invoking this callback.
 export type DeadConnectionHandler = (reason: string) => void;
+
+// Handle to a live /worktreeJobs subscription: `done` settles when the stream
+// ends (resolve) or errors (reject); `stop()` tears it down.
+export interface WorktreeJobsStream {
+  stop(): void;
+  done: Promise<void>;
+}
 
 // A keep-alive client plus heartbeat loop that keeps the server from
 // idle-exiting under a live extension window.
@@ -49,44 +65,133 @@ export class ServerClient {
     this.agent.destroy();
   }
 
+  // One HTTP round-trip that collects the body and JSON-parses it. A non-JSON
+  // body (proxy error page, empty) yields {} so the caller can fall back to
+  // statusCode rather than surfacing a confusing parse error.
+  private requestJson<T>(
+    options: http.RequestOptions,
+    init?: { payload?: string; timeoutMs?: number },
+  ): Promise<{ statusCode: number; parsed: Partial<T> }> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const statusCode = res.statusCode ?? 0;
+          const text = Buffer.concat(chunks).toString('utf8');
+          let parsed: Partial<T> = {};
+          try {
+            if (text) {
+              parsed = JSON.parse(text) as Partial<T>;
+            }
+          } catch {
+            // Leave parsed = {}; caller decides based on statusCode.
+          }
+          resolve({ statusCode, parsed });
+        });
+      });
+      if (init?.timeoutMs !== undefined) {
+        req.setTimeout(init.timeoutMs, () => {
+          req.destroy(new Error('request timeout'));
+        });
+      }
+      req.on('error', reject);
+      req.end(init?.payload);
+    });
+  }
+
   // Live instances registered with this server. Used by the worktrees view to
   // mark which worktrees have an open window.
-  public instances(): Promise<InstancesResponse> {
-    return new Promise((resolve, reject) => {
-      const req = http.get(
-        { host: HOST, port: this.port, path: ROUTES.instances, agent: this.agent },
+  public async instances(): Promise<InstancesResponse> {
+    const { statusCode, parsed } = await this.requestJson<InstancesResponse>(
+      { host: HOST, port: this.port, path: ROUTES.instances, agent: this.agent },
+      { timeoutMs: INSTANCES_TIMEOUT_MS },
+    );
+    if (statusCode < 200 || statusCode >= 300) {
+      throw new Error(`status ${statusCode}`);
+    }
+    return {
+      instances: Array.isArray(parsed.instances)
+        ? parsed.instances.filter(
+            (item): item is { groupId: string; worktreePath: string } =>
+              typeof item?.groupId === 'string' && typeof item.worktreePath === 'string',
+          )
+        : [],
+    };
+  }
+
+  // Starts a background worktree-create job and returns its id. The actual
+  // work (git + bootstrap) runs server-side and outlives this request, so
+  // this is a quick call that can share the keep-alive agent.
+  public async createWorktree(request: CreateWorktreeRequest): Promise<string> {
+    const payload = JSON.stringify(request);
+    const { statusCode, parsed } = await this.requestJson<CreateWorktreeResponse>(
+      {
+        host: HOST,
+        port: this.port,
+        path: ROUTES.createWorktree,
+        method: 'POST',
+        agent: this.agent,
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      { payload, timeoutMs: CREATE_WORKTREE_TIMEOUT_MS },
+    );
+    if (statusCode >= 200 && statusCode < 300 && typeof parsed.jobId === 'string') {
+      return parsed.jobId;
+    }
+    throw new Error(parsed.error || `status ${statusCode}`);
+  }
+
+  // Subscribes to the server's active-jobs stream: `onMessage` gets one
+  // `snapshot` then an `event` per job event, for as long as the connection
+  // lives. It never settles on a job's terminal event — the stream spans all
+  // jobs. `done` resolves when the stream ends and rejects on a connection
+  // error; `stop()` tears it down (caller reconnects / disposes). Uses a
+  // dedicated connection (agent: false) with no timeout — it stays open
+  // indefinitely, so it must not borrow the shared maxSockets:1 heartbeat
+  // agent.
+  public streamWorktreeJobs(onMessage: (message: WorktreeJobsMessage) => void): WorktreeJobsStream {
+    let request: http.ClientRequest | undefined;
+    const done = new Promise<void>((resolve, reject) => {
+      request = http.get(
+        {
+          host: HOST,
+          port: this.port,
+          path: ROUTES.worktreeJobs,
+          agent: false,
+          headers: { accept: 'text/event-stream' },
+        },
         (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const statusCode = res.statusCode ?? 0;
-            if (statusCode < 200 || statusCode >= 300) {
-              reject(new Error(`status ${statusCode}`));
+          const statusCode = res.statusCode ?? 0;
+          if (statusCode < 200 || statusCode >= 300) {
+            res.resume();
+            reject(new Error(`status ${statusCode}`));
+            return;
+          }
+          const splitter = lineSplitter((line) => {
+            if (!line.startsWith('data:')) {
               return;
             }
             try {
-              const parsed = JSON.parse(
-                Buffer.concat(chunks).toString('utf8'),
-              ) as Partial<InstancesResponse>;
-              resolve({
-                instances: Array.isArray(parsed.instances)
-                  ? parsed.instances.filter(
-                      (item): item is { groupId: string; worktreePath: string } =>
-                        typeof item?.groupId === 'string' && typeof item.worktreePath === 'string',
-                    )
-                  : [],
-              });
-            } catch (err) {
-              reject(err);
+              onMessage(JSON.parse(line.slice(line.indexOf(':') + 1)) as WorktreeJobsMessage);
+            } catch {
+              // Ignore a malformed frame; the stream stays usable.
             }
           });
+          res.on('data', (chunk: Buffer) => splitter.write(chunk));
+          res.on('end', () => {
+            splitter.flush();
+            resolve();
+          });
+          res.on('error', reject);
         },
       );
-      req.setTimeout(INSTANCES_TIMEOUT_MS, () => {
-        req.destroy(new Error('instances timeout'));
-      });
-      req.on('error', reject);
+      request.on('error', reject);
     });
+    return { stop: () => request?.destroy(), done };
   }
 
   private markFailed(reason: string): void {

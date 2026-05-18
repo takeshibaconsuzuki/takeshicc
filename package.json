@@ -87,6 +87,11 @@
           "type": "string",
           "default": "~/worktrees",
           "description": "Base directory used for default new worktree paths. The create-worktree form defaults to <worktreePrefix>/<groupId>/<newBranchName>."
+        },
+        "takeshicc.worktreeBootstrapCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Shell command run by the Takeshicc server in a newly created worktree after git worktree add succeeds. Receives TAKESHICC_WORKTREE_PATH, TAKESHICC_BRANCH_NAME, and TAKESHICC_BASE_BRANCH."
         }
       }
     }
