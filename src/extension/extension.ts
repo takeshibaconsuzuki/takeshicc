@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import { applyLayout } from './applyLayout';
 import { openConfig } from './openConfig';
 import { registerPasteFileRef } from './pasteFileRef';
-import { getOrCreateServer, openServerLog, ServerClient } from './getOrCreateServer';
+import { getOrCreateServer, openServerLog } from './getOrCreateServer';
 import { COMMANDS } from './commands';
+import type { ServerClient } from './ServerClient';
 
 let serverClient: ServerClient | undefined;
 let reconnecting = false;
