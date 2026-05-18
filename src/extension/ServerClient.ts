@@ -4,7 +4,6 @@ import { HOST, ROUTES } from '../common/protocol';
 import { errMsg } from '../common/errMsg';
 
 const HEARTBEAT_TIMEOUT_MS = 1_000;
-const HEARTBEAT_FAILURES_BEFORE_RECONNECT = 2;
 
 // Contract: implementations must clean up before invoking this callback.
 export type DeadConnectionHandler = (reason: string) => void;
@@ -19,12 +18,12 @@ export class ServerClient {
   private readonly pingPath: string;
   private readonly timer: NodeJS.Timeout;
   private closed = false;
-  private failures = 0;
+  private failedSinceMs: number | undefined;
 
   constructor(
     port: number,
     groupId: string,
-    idleTimeoutMs: number,
+    private readonly idleTimeoutMs: number,
     instanceId: string,
     private readonly log: vscode.OutputChannel,
     private readonly onDeadConnection: DeadConnectionHandler,
@@ -33,7 +32,7 @@ export class ServerClient {
     this.groupId = groupId;
     this.pingPath = `${ROUTES.ping}?instanceId=${encodeURIComponent(instanceId)}`;
 
-    const heartbeatMs = Math.floor(idleTimeoutMs / 3);
+    const heartbeatMs = Math.floor(this.idleTimeoutMs / 3);
     this.timer = setInterval(() => {
       this.heartbeat();
     }, heartbeatMs);
@@ -53,11 +52,13 @@ export class ServerClient {
     if (this.closed) {
       return;
     }
-    this.failures += 1;
+    const now = Date.now();
+    this.failedSinceMs ??= now;
+    const failedForMs = now - this.failedSinceMs;
     this.log.appendLine(
-      `Takeshicc: heartbeat failed (${this.failures}/${HEARTBEAT_FAILURES_BEFORE_RECONNECT}) — ${reason}`,
+      `Takeshicc: heartbeat failed (${failedForMs}ms/${this.idleTimeoutMs}ms) — ${reason}`,
     );
-    if (this.failures >= HEARTBEAT_FAILURES_BEFORE_RECONNECT) {
+    if (failedForMs >= this.idleTimeoutMs) {
       this.close();
       this.onDeadConnection(reason);
     }
@@ -76,7 +77,7 @@ export class ServerClient {
             return;
           }
           if (statusCode >= 200 && statusCode < 300) {
-            this.failures = 0;
+            this.failedSinceMs = undefined;
           } else {
             this.markFailed(`ping status ${statusCode}`);
           }
