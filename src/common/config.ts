@@ -23,7 +23,7 @@ const GroupSchema = z.object({
   port: z.number().int().min(1024).max(65535),
   // .min(5_000): below this, HEARTBEAT_MS (idleTimeoutMs / 3) drops under the
   // 5_000 ms IDLE_CHECK_MS and the server can idle-exit under a live client.
-  idleTimeoutMs: z.number().int().min(5_000).default(60_000),
+  idleTimeoutMs: z.number().int().min(5_000).default(10_000),
 });
 
 const ConfigSchema = z.object({
