@@ -15,8 +15,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished",
-    "onView:takeshicc.worktreesView"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
