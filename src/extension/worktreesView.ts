@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { errMsg } from '../common/errMsg';
-import { canonicalizePath } from '../common/gitUtils';
+import { canonicalizePath, type GitMetadata } from '../common/gitUtils';
 import type { ServerClient } from './ServerClient';
 
 interface WorktreeEntry {
@@ -106,20 +106,6 @@ function parseBranches(stdout: string): string[] {
   ).sort((a, b) => a.localeCompare(b));
 }
 
-function getWorkspacePath(): string | undefined {
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders?.length) {
-    return undefined;
-  }
-
-  const activeUri = vscode.window.activeTextEditor?.document.uri;
-  if (activeUri?.scheme === 'file') {
-    return vscode.workspace.getWorkspaceFolder(activeUri)?.uri.fsPath ?? folders[0].uri.fsPath;
-  }
-
-  return folders[0].uri.fsPath;
-}
-
 function expandHome(inputPath: string): string {
   if (inputPath === '~') {
     return os.homedir();
@@ -143,13 +129,11 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'takeshicc.worktreesView';
 
   private view?: vscode.WebviewView;
-  // Cached `rev-parse --show-toplevel` from the last refresh; stable for the
-  // life of a modal session, so createWorktree need not re-spawn git for it.
-  private workspaceRoot?: string;
 
   constructor(
     private readonly log: vscode.OutputChannel,
     private readonly getServerClient: () => ServerClient | undefined,
+    private readonly gitMetadata: GitMetadata,
   ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -182,33 +166,21 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const workspacePath = getWorkspacePath();
-    if (!workspacePath) {
-      await this.postState({
-        worktrees: [],
-        branches: [],
-        error: 'Open a workspace folder to manage worktrees.',
-      });
-      return;
-    }
+    const myWorktreePath = this.gitMetadata.worktreePath;
 
     try {
-      const [worktreesStdout, branchesStdout, currentWorktreePath, currentBranch] =
-        await Promise.all([
-          runGit(['worktree', 'list', '--porcelain'], workspacePath),
-          runGit(
-            ['for-each-ref', '--format=%(refname:short) %(symref)', 'refs/heads', 'refs/remotes'],
-            workspacePath,
-          ),
-          runGit(['rev-parse', '--show-toplevel'], workspacePath),
-          runGit(['branch', '--show-current'], workspacePath),
-        ]);
-      this.workspaceRoot = currentWorktreePath.trim();
-      const currentPath = canonicalizePath(this.workspaceRoot);
+      const [worktreesStdout, branchesStdout] = await Promise.all([
+        runGit(['worktree', 'list', '--porcelain'], myWorktreePath),
+        runGit(
+          ['for-each-ref', '--format=%(refname:short) %(symref)', 'refs/heads', 'refs/remotes'],
+          myWorktreePath,
+        ),
+      ]);
       const registeredPaths = await this.registeredWorktreePaths();
+      // gitMetadata.worktreePath is already canonical (resolveGitMetadata).
       const worktrees = parseWorktrees(worktreesStdout)
         .map((worktree) => ({ worktree, canonical: canonicalizePath(worktree.path) }))
-        .filter(({ canonical }) => canonical !== currentPath)
+        .filter(({ canonical }) => canonical !== myWorktreePath)
         .map(({ worktree, canonical }) => ({
           ...worktree,
           registered: registeredPaths.has(canonical),
@@ -217,7 +189,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       await this.postState({
         worktrees,
         branches: parseBranches(branchesStdout),
-        currentBranch: currentBranch.trim() || undefined,
+        currentBranch: this.gitMetadata.currentBranch,
       });
     } catch (err) {
       await this.postState({
@@ -260,26 +232,15 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const workspacePath = getWorkspacePath();
-    if (!workspacePath) {
-      await this.post({
-        type: 'createResult',
-        ok: false,
-        error: 'Open a workspace folder to create a worktree.',
-      });
-      return;
-    }
+    const myWorktreePath = this.gitMetadata.worktreePath;
 
     try {
-      const root =
-        this.workspaceRoot ??
-        (await runGit(['rev-parse', '--show-toplevel'], workspacePath)).trim();
       const expandedPath = expandHome(inputPath);
       const resolvedPath = path.isAbsolute(expandedPath)
         ? expandedPath
-        : path.resolve(path.dirname(root), expandedPath);
+        : path.resolve(path.dirname(myWorktreePath), expandedPath);
 
-      await runGit(['worktree', 'add', '-b', branchName, resolvedPath, baseBranch], workspacePath);
+      await runGit(['worktree', 'add', '-b', branchName, resolvedPath, baseBranch], myWorktreePath);
       await this.refresh();
       await this.post({ type: 'createResult', ok: true });
     } catch (err) {

@@ -6,12 +6,19 @@ import { getOrCreateServer, openServerLog } from './getOrCreateServer';
 import { COMMANDS } from './commands';
 import type { ServerClient } from './ServerClient';
 import { WorktreesViewProvider } from './worktreesView';
+import { resolveGitMetadata, type GitMetadata } from '../common/gitUtils';
+import { errMsg } from '../common/errMsg';
+import { CONFIG_PATH, lookupGroup, type ResolvedGroup } from '../common/config';
 
 let serverClient: ServerClient | undefined;
 let reconnecting = false;
 let deactivated = false;
 
-function startServerSupervisor(context: vscode.ExtensionContext, log: vscode.OutputChannel): void {
+function startServerSupervisor(
+  context: vscode.ExtensionContext,
+  log: vscode.OutputChannel,
+  group: ResolvedGroup,
+): void {
   const connect = async (reason: string) => {
     if (deactivated || reconnecting) {
       return;
@@ -22,7 +29,7 @@ function startServerSupervisor(context: vscode.ExtensionContext, log: vscode.Out
       log.appendLine(`Takeshicc: reconnecting to server after ${reason}.`);
     }
     try {
-      serverClient = await getOrCreateServer(context, log, (deadReason) => {
+      serverClient = await getOrCreateServer(context, log, group, (deadReason) => {
         void connect(deadReason);
       });
     } catch (err) {
@@ -41,26 +48,65 @@ function startServerSupervisor(context: vscode.ExtensionContext, log: vscode.Out
 
 export async function activate(context: vscode.ExtensionContext) {
   deactivated = false;
-  // Created before commands so the openServerLog handler can log through it.
+
   const log = vscode.window.createOutputChannel('Takeshicc');
+  context.subscriptions.push(log);
+
   context.subscriptions.push(
-    log,
     vscode.commands.registerCommand(COMMANDS.applyLayout, () => applyLayout(context)),
     vscode.commands.registerCommand(COMMANDS.openConfig, () => openConfig()),
-    vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(log)),
+  );
+  registerPasteFileRef(context);
+
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) {
+    log.appendLine('Takeshicc: no workspace folder found');
+    return;
+  }
+
+  let gitMetadata: GitMetadata;
+  try {
+    gitMetadata = await resolveGitMetadata(folder.uri.fsPath);
+  } catch (err) {
+    log.appendLine(`Takeshicc: could not resolve git metadata — ${errMsg(err)}`);
+    return;
+  }
+
+  let group: ResolvedGroup | undefined;
+  try {
+    group = lookupGroup(gitMetadata);
+  } catch (err) {
+    const message = `Takeshicc: invalid config at ${CONFIG_PATH} — ${errMsg(err)}`;
+    log.appendLine(message);
+    vscode.window.showErrorMessage(message);
+    return;
+  }
+  if (!group) {
+    log.appendLine(
+      `Takeshicc: group "${gitMetadata.mainWorktreePath}" not found in ${CONFIG_PATH}.`,
+    );
+    return;
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(group)),
     vscode.window.registerWebviewViewProvider(
       WorktreesViewProvider.viewType,
-      new WorktreesViewProvider(log, () => serverClient),
+      new WorktreesViewProvider(log, () => serverClient, gitMetadata),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
-  registerPasteFileRef(context);
 
   log.appendLine(
     `Takeshicc: extension activated (v${context.extension.packageJSON.version ?? '?'}).`,
   );
+  log.appendLine(
+    `Takeshicc: git main-worktree ${gitMetadata.mainWorktreePath}, ` +
+      `current worktree ${gitMetadata.worktreePath}, ` +
+      `branch ${gitMetadata.currentBranch ?? 'detached HEAD'}.`,
+  );
 
-  startServerSupervisor(context, log);
+  startServerSupervisor(context, log, group);
 }
 
 export function deactivate() {

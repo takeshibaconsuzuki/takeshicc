@@ -1,7 +1,7 @@
 // Atomic getOrCreate for the per-repo HTTP server.
 //
-// Runs once on activation. Resolves the git group, looks it up in the config,
-// then loops forever converging on a single shared server: POST /register,
+// Runs once on activation after the extension has resolved the configured git
+// group. Loops forever converging on a single shared server: POST /register,
 // spawn a detached server process if none answers, poll until it admits us.
 // The OS port bind is the mutex — duplicate spawns are harmless.
 
@@ -11,15 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { HOST, ROUTES, RegisterRequest, RegisterResponse } from '../common/protocol';
-import {
-  CONFIG_PATH,
-  TAKESHICC_DIR,
-  lookupGroup,
-  serverLogPath,
-  ResolvedGroup,
-} from '../common/config';
-import { resolveGitMetadata } from '../common/gitUtils';
-import { errMsg } from '../common/errMsg';
+import { CONFIG_PATH, TAKESHICC_DIR, serverLogPath, ResolvedGroup } from '../common/config';
 import { DeadConnectionHandler, ServerClient } from './ServerClient';
 
 const REGISTER_TIMEOUT_MS = 1_000;
@@ -184,43 +176,6 @@ function spawnServer(
   }
 }
 
-type GroupResolution =
-  | { kind: 'ok'; group: ResolvedGroup }
-  | { kind: 'no-folder' }
-  | { kind: 'not-git' }
-  | { kind: 'bad-config'; message: string }
-  | { kind: 'not-configured'; mainWorktreePath: string };
-
-// Workspace folder -> git metadata -> config lookup. Returns a reason the
-// callers map to their own UI; resolveGitMetadata logs the 'not-git'
-// specifics itself.
-async function resolveConfiguredGroup(log: vscode.OutputChannel): Promise<GroupResolution> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) {
-    return { kind: 'no-folder' };
-  }
-  const meta = await resolveGitMetadata(folder.uri.fsPath, log);
-  if (!meta) {
-    return { kind: 'not-git' };
-  }
-  let group: ResolvedGroup | undefined;
-  try {
-    group = lookupGroup(meta);
-  } catch (err) {
-    return { kind: 'bad-config', message: errMsg(err) };
-  }
-  if (!group) {
-    return { kind: 'not-configured', mainWorktreePath: meta.mainWorktreePath };
-  }
-  return { kind: 'ok', group };
-}
-
-function reportBadConfig(message: string, log: vscode.OutputChannel): void {
-  const line = `Takeshicc: invalid config at ${CONFIG_PATH} — ${message}`;
-  vscode.window.showErrorMessage(line);
-  log.appendLine(line);
-}
-
 function reportMismatch(port: number, otherGroup: string, mainWorktreePath: string): void {
   vscode.window.showErrorMessage(
     `Takeshicc: port ${port} is held by another process (group ` +
@@ -231,31 +186,11 @@ function reportMismatch(port: number, otherGroup: string, mainWorktreePath: stri
 export async function getOrCreateServer(
   context: vscode.ExtensionContext,
   log: vscode.OutputChannel,
+  group: ResolvedGroup,
   onDeadConnection: DeadConnectionHandler = () => {},
 ): Promise<ServerClient | undefined> {
   log.appendLine('Takeshicc: resolving server...');
 
-  const r = await resolveConfiguredGroup(log);
-  if (r.kind === 'no-folder') {
-    log.appendLine('Takeshicc: no workspace folder open — server feature off.');
-    return undefined;
-  }
-  if (r.kind === 'not-git') {
-    return undefined; // resolveGitMetadata already logged the specific reason
-  }
-  if (r.kind === 'bad-config') {
-    reportBadConfig(r.message, log);
-    return undefined;
-  }
-  if (r.kind === 'not-configured') {
-    log.appendLine(
-      `Takeshicc: group "${r.mainWorktreePath}" not found in ${CONFIG_PATH} — server feature off. ` +
-        `Add a "groups" entry for it to enable the server.`,
-    );
-    return undefined;
-  }
-
-  const { group } = r;
   const { port, idleTimeoutMs, groupId, mainWorktreePath, worktreePath } = group;
   log.appendLine(
     `Takeshicc: group "${mainWorktreePath}" -> port ${port}, idleTimeoutMs ${idleTimeoutMs}.`,
@@ -297,30 +232,8 @@ export async function getOrCreateServer(
 
 // Command handler: opens the per-port server log for the current workspace's
 // configured group, or explains why there is none.
-export async function openServerLog(log: vscode.OutputChannel): Promise<void> {
-  const r = await resolveConfiguredGroup(log);
-  if (r.kind === 'no-folder') {
-    vscode.window.showInformationMessage('Takeshicc: no workspace folder open.');
-    return;
-  }
-  if (r.kind === 'not-git') {
-    vscode.window.showInformationMessage(
-      'Takeshicc: workspace is not a git repository — no server log.',
-    );
-    return;
-  }
-  if (r.kind === 'bad-config') {
-    reportBadConfig(r.message, log);
-    return;
-  }
-  if (r.kind === 'not-configured') {
-    vscode.window.showInformationMessage(
-      `Takeshicc: "${r.mainWorktreePath}" is not in ${CONFIG_PATH} — no server log.`,
-    );
-    return;
-  }
-
-  const logPath = serverLogPath(r.group.port);
+export async function openServerLog(group: ResolvedGroup): Promise<void> {
+  const logPath = serverLogPath(group.port);
   if (!fs.existsSync(logPath)) {
     vscode.window.showInformationMessage(
       `Takeshicc: no server log at ${logPath} yet — the server has not been spawned.`,

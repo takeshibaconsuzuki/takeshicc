@@ -18,14 +18,16 @@ place rather than appending.
 
 # takeshicc
 
-A small VS Code extension (also runs in Cursor, a VS Code fork): a few
-editor-layout/terminal commands plus a per-repository local HTTP server.
+A small VS Code extension (also runs in Cursor, a VS Code fork): a worktree
+sidebar plus editor-layout/terminal commands, backed by a per-repository
+local HTTP server.
 
 ## Build
 
 ```
 npm install        # postinstall rebuilds native modules (see Native modules)
 npm run build:all  # or build:ext / build:server; watch:ext / watch:server
+npm run lint       # eslint (lint:fix to autofix); format / format:check = prettier
 npm run vsix       # package the .vsix
 npm run rebuild    # re-run the native-module ABI rebuild standalone
 ```
@@ -33,9 +35,10 @@ npm run rebuild    # re-run the native-module ABI rebuild standalone
 esbuild (`scripts/esbuild.mjs`) bundles each entry point into one CJS file
 under `out/`, leaving host-provided and native dependencies external.
 Type-checking runs *inside* every build (no separate typecheck step;
-`tsconfig.json` is `noEmit`); there is no test suite. On macOS/Linux use
-system Node 20+; on Windows the pinned toolchain is bootstrapped by
-`scripts/setup-node.ps1`.
+`tsconfig.json` is `noEmit`); there is no test suite. Prettier owns
+formatting and ESLint defers to it (`eslint-config-prettier`). On
+macOS/Linux use system Node 20+; on Windows the pinned toolchain is
+bootstrapped by `scripts/setup-node.ps1`.
 
 ## Source layout
 
@@ -81,6 +84,8 @@ system Node 20+; on Windows the pinned toolchain is bootstrapped by
   converges once the offending instance is pruned (freeing the slot to
   re-register with the still-running shared server) or, if it was the sole
   instance, the now-empty server idle-exits and the client respawns one.
+  `GET /instances` exposes a snapshot of this registry so extension UI can
+  show which sibling worktrees currently have a live VS Code window.
 - **Spawned as plain Node** via `process.execPath` + `ELECTRON_RUN_AS_NODE=1`;
   logs to `~/.takeshicc/server-<port>.log`.
 - **Idle/heartbeat.** Per-instance liveness moves *only* on successful
@@ -101,11 +106,20 @@ idle-timeout bounds are **duplicated in `server.ts`** and must stay in sync;
 the idle-timeout floor exists so a live client's heartbeat always outpaces
 both the server's idle-exit check and the stale-instance sweep.
 
-## Commands
+## User-facing surface
 
-IDs in `src/extension/commands.ts` **must stay in sync** with
-`contributes.commands` in `package.json`.
+Command IDs in `src/extension/commands.ts` and the webview view id **must
+stay in sync** with `contributes.commands` / `contributes.views` in
+`package.json`; activation also wires the keybindings declared there.
 
+- **Worktrees view** (`src/extension/worktreesView.ts`) — the primary UI: a
+  webview in the activity-bar sidebar that lists the repo's git worktrees,
+  creates new ones (`git worktree add`), and opens one in a new window.
+  Worktrees with a live VS Code window are flagged by cross-referencing the
+  server's `/instances` snapshot through `ServerClient`. The view is a
+  self-contained HTML/CSS/JS string with a strict CSP; the host side only
+  shells out to `git` and posts state — keep the wire `*Message` types and
+  the message handlers as the contract between the two halves.
 - `applyLayout` — writes `workbench.sideBar.size`/`workbench.panel.size`
   directly into VS Code's *global* `state.vscdb` (a SQLite file — this is why
   a native module is needed). Requires quitting the editor after; Reload

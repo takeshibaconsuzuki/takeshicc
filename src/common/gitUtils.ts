@@ -9,7 +9,6 @@
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
-import { Logger } from './logger';
 
 // Canonicalizes a filesystem path so config keys and resolved keys compare
 // exactly: path.resolve, normalize separators to '/', lowercase a Windows
@@ -55,17 +54,17 @@ export interface GitMetadata {
   // Canonical root of *this* working tree (linked or main), stable no matter
   // which subdirectory was opened. The per-instance identity.
   worktreePath: string;
+  // Current branch for this worktree. Undefined when HEAD is detached.
+  currentBranch?: string;
 }
 
-// Returns this workspace folder's GitMetadata, or undefined to bail (not a
-// git repo, bare repo, git not installed).
-export async function resolveGitMetadata(
-  workspaceFolderFsPath: string,
-  log: Logger,
-): Promise<GitMetadata | undefined> {
-  // One command; the options print on consecutive lines in argument order.
-  // --show-toplevel is kept last so it does not shift the bare-repo guards
-  // (a bare repo prints an empty top-level, which the filter drops).
+// Returns this workspace folder's GitMetadata. Throws when the path cannot be
+// resolved as a non-bare git worktree.
+export async function resolveGitMetadata(workspaceFolderFsPath: string): Promise<GitMetadata> {
+  // One command for the required identity; the options print on consecutive
+  // lines in argument order. --show-toplevel is kept last so it does not shift
+  // the bare-repo guards (a bare repo prints an empty top-level, which the
+  // filter drops).
   // --path-format=absolute requires git >= 2.31.
   const args = [
     '-C',
@@ -77,20 +76,26 @@ export async function resolveGitMetadata(
     '--show-toplevel',
   ];
 
+  // Independent of the rev-parse parsing below, so spawn it concurrently. Kept
+  // a separate process rather than folded into the rev-parse: `rev-parse
+  // --abbrev-ref HEAD` exits non-zero on an unborn branch, which would abort
+  // all metadata resolution; `branch --show-current` stays empty + exit 0.
+  const branchPromise = runGit(
+    ['-C', workspaceFolderFsPath, 'branch', '--show-current'],
+    workspaceFolderFsPath,
+  )
+    .then((r) => r.stdout.trim() || undefined)
+    .catch(() => undefined);
+
   let stdout: string;
   try {
     ({ stdout } = await runGit(args, workspaceFolderFsPath));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
-      log.appendLine('Takeshicc: git not found on PATH — server feature disabled.');
-    } else {
-      // Non-zero exit (incl. "fatal: not a git repository") -> bail.
-      log.appendLine(
-        `Takeshicc: ${workspaceFolderFsPath} is not a git repository — server feature off.`,
-      );
+      throw new Error('git not found on PATH', { cause: err });
     }
-    return undefined;
+    throw new Error(`${workspaceFolderFsPath} is not a git repository`, { cause: err });
   }
 
   const lines = stdout
@@ -98,30 +103,22 @@ export async function resolveGitMetadata(
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
   if (lines.length < 2) {
-    log.appendLine(`Takeshicc: unexpected git rev-parse output — server feature off.`);
-    return undefined;
+    throw new Error('unexpected git rev-parse output');
   }
   const gitCommonDir = lines[0];
   const isBare = lines[1];
 
   // The real guard: a bare repo has no main worktree.
   if (isBare === 'true') {
-    log.appendLine(
-      `Takeshicc: ${workspaceFolderFsPath} is a bare git repository — server feature off.`,
-    );
-    return undefined;
+    throw new Error(`${workspaceFolderFsPath} is a bare git repository`);
   }
   // Belt-and-suspenders: a bare repo's common dir does not end in `.git`.
   if (!/[\\/]\.git$/.test(gitCommonDir)) {
-    log.appendLine(
-      `Takeshicc: git common dir "${gitCommonDir}" is not a worktree .git — server feature off.`,
-    );
-    return undefined;
+    throw new Error(`git common dir "${gitCommonDir}" is not a worktree .git`);
   }
   // Non-bare repos always print a top-level on the third line.
   if (lines.length < 3) {
-    log.appendLine(`Takeshicc: git rev-parse did not report a worktree root — server feature off.`);
-    return undefined;
+    throw new Error('git rev-parse did not report a worktree root');
   }
 
   // --git-common-dir is the shared `.git` even from a linked worktree, so its
@@ -129,8 +126,6 @@ export async function resolveGitMetadata(
   // tree's own root, distinct per linked worktree and subdirectory-proof.
   const mainWorktreePath = canonicalizePath(path.dirname(gitCommonDir));
   const worktreePath = canonicalizePath(lines[2]);
-  log.appendLine(
-    `Takeshicc: resolved main-worktree ${mainWorktreePath}, current worktree ${worktreePath}`,
-  );
-  return { mainWorktreePath, worktreePath };
+
+  return { mainWorktreePath, worktreePath, currentBranch: await branchPromise };
 }
