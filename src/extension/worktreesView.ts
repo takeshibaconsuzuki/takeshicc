@@ -441,6 +441,10 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       text-transform: uppercase;
     }
 
+    .worktree-search {
+      margin-bottom: 8px;
+    }
+
     .worktree-list {
       display: flex;
       flex-direction: column;
@@ -637,6 +641,10 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       <main class="dialog-body">
         <section>
           <h2 class="section-title">List of worktrees</h2>
+          <label class="worktree-search">
+            Search worktrees
+            <input id="worktreeSearch" type="search" autocomplete="off">
+          </label>
           <ul id="worktrees" class="worktree-list"></ul>
         </section>
         <section>
@@ -682,6 +690,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     const modal = document.getElementById('modal');
     const form = document.getElementById('form');
     const createButton = document.getElementById('create');
+    const worktreeSearch = document.getElementById('worktreeSearch');
     const worktrees = document.getElementById('worktrees');
     const branchSelect = document.getElementById('branchSelect');
     const branchSelectButton = document.getElementById('branchSelectButton');
@@ -691,6 +700,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     const baseBranch = document.getElementById('baseBranch');
     const worktreePath = document.getElementById('worktreePath');
     const status = document.getElementById('status');
+    let allWorktrees = [];
+    let worktreesError = '';
     let availableBranches = [];
     let currentBranch = '';
     let groupId = '';
@@ -710,6 +721,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     function openModal() {
       modal.classList.add('open');
+      requestAnimationFrame(() => worktreeSearch.focus());
       setStatus('Loading...');
       vscode.postMessage({ type: 'refresh' });
     }
@@ -775,9 +787,68 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       return item.branch || 'Unknown branch';
     }
 
-    function renderState(state) {
+    function matchesWorktreeQuery(item, query) {
+      const normalizedQuery = query.trim().toLocaleLowerCase();
+      if (!normalizedQuery) {
+        return true;
+      }
+
+      return worktreeLabel(item).toLocaleLowerCase().includes(normalizedQuery);
+    }
+
+    function renderWorktrees() {
       worktrees.textContent = '';
+      const query = worktreeSearch.value;
+      const visibleWorktrees = allWorktrees.filter((item) => matchesWorktreeQuery(item, query));
+
+      if (allWorktrees.length === 0) {
+        const empty = document.createElement('li');
+        empty.className = 'muted';
+        empty.textContent = worktreesError || 'No worktrees found.';
+        worktrees.appendChild(empty);
+        return;
+      }
+
+      if (visibleWorktrees.length === 0) {
+        const empty = document.createElement('li');
+        empty.className = 'muted';
+        empty.textContent = 'No worktrees match your search.';
+        worktrees.appendChild(empty);
+        return;
+      }
+
+      for (const item of visibleWorktrees) {
+        const listItem = document.createElement('li');
+        const row = document.createElement('button');
+        row.className = 'worktree-item';
+        row.type = 'button';
+        row.title = item.path;
+        row.addEventListener('click', () => {
+          closeModal();
+          vscode.postMessage({ type: 'open', worktreePath: item.path });
+        });
+
+        const branch = document.createElement('div');
+        branch.className = 'worktree-branch';
+        branch.textContent = worktreeLabel(item);
+
+        row.append(branch);
+        if (item.registered) {
+          const indicator = document.createElement('span');
+          indicator.className = 'registered-indicator';
+          indicator.title = 'Registered';
+          indicator.setAttribute('aria-label', 'Registered');
+          row.appendChild(indicator);
+        }
+        listItem.appendChild(row);
+        worktrees.appendChild(listItem);
+      }
+    }
+
+    function renderState(state) {
       branchOptions.textContent = '';
+      allWorktrees = state.worktrees;
+      worktreesError = state.error || '';
       availableBranches = state.branches;
       currentBranch = state.currentBranch || '';
       groupId = state.groupId || '';
@@ -803,39 +874,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         setBaseBranch(defaultBranch);
       }
 
-      if (state.worktrees.length === 0) {
-        const empty = document.createElement('li');
-        empty.className = 'muted';
-        empty.textContent = state.error || 'No worktrees found.';
-        worktrees.appendChild(empty);
-      } else {
-        for (const item of state.worktrees) {
-          const listItem = document.createElement('li');
-          const row = document.createElement('button');
-          row.className = 'worktree-item';
-          row.type = 'button';
-          row.title = item.path;
-          row.addEventListener('click', () => {
-            closeModal();
-            vscode.postMessage({ type: 'open', worktreePath: item.path });
-          });
-
-          const branch = document.createElement('div');
-          branch.className = 'worktree-branch';
-          branch.textContent = worktreeLabel(item);
-
-          row.append(branch);
-          if (item.registered) {
-            const indicator = document.createElement('span');
-            indicator.className = 'registered-indicator';
-            indicator.title = 'Registered';
-            indicator.setAttribute('aria-label', 'Registered');
-            row.appendChild(indicator);
-          }
-          listItem.appendChild(row);
-          worktrees.appendChild(listItem);
-        }
-      }
+      renderWorktrees();
 
       setBusy(false);
       setStatus(state.error || '');
@@ -843,6 +882,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     openButton.addEventListener('click', openModal);
     closeButton.addEventListener('click', closeModal);
+    worktreeSearch.addEventListener('input', renderWorktrees);
     branchName.addEventListener('input', updateAutomaticWorktreePath);
     worktreePath.addEventListener('input', () => {
       if (!isUpdatingWorktreePath) {

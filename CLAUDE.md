@@ -58,7 +58,7 @@ bootstrapped by `scripts/setup-node.ps1`.
   normalizes user-authored config keys in `lookupGroup`), so everything
   carried by `GitMetadata`/`ResolvedGroup`/the wire is already canonical.
   `groupIdFor`/`instanceIdFor` sha256 those paths into *namespaced* opaque
-  ids (`group:`/`instance:`) — the raw hash is private so a worktree that
+  ids (`group_`/`instance_`) — the raw hash is private so a worktree that
   *is* its main worktree can't collide its group and instance ids.
   `lookupGroup` composes the one `ResolvedGroup` carrier downstream reads.
   `groupId` is the routing token and the `/register` identity check (it
@@ -76,7 +76,7 @@ bootstrapped by `scripts/setup-node.ps1`.
   (the response also carries `mainWorktreePath` so that error names the
   offending repo).
 - **Registry.** A successful `/register` admits the client into the server's
-  in-memory map keyed by `instanceId` (the `instance:…` id of the
+  in-memory map keyed by `instanceId` (the `instance_…` id of the
   canonicalized worktree path, server-derived and handed back so the client
   echoes it on every heartbeat) — the seed for future message routing between
   the VS Code instances sharing one server. A stale build or a worktree whose instance is

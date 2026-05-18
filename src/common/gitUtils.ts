@@ -28,11 +28,11 @@ function pathId(p: string): string {
 }
 
 export function groupIdFor(mainWorktreePath: string): string {
-  return `group:${pathId(mainWorktreePath)}`;
+  return `group_${pathId(mainWorktreePath)}`;
 }
 
 export function instanceIdFor(worktreePath: string): string {
-  return `instance:${pathId(worktreePath)}`;
+  return `instance_${pathId(worktreePath)}`;
 }
 
 function runGit(args: string[], cwd: string): Promise<{ stdout: string }> {
