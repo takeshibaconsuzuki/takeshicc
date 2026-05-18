@@ -1,6 +1,7 @@
 **
 
 !package.json
+!media/takeshicc.svg
 !out/**/*.js
 !node_modules/better-sqlite3/package.json
 !node_modules/better-sqlite3/lib/**
