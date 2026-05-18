@@ -82,6 +82,11 @@
           "default": 300,
           "minimum": 0,
           "description": "Panel width in pixels (used when the panel is docked left/right). Written into the workspace state.vscdb when running 'Takeshicc: Apply Sidebar & Panel Widths'."
+        },
+        "takeshicc.worktreePrefix": {
+          "type": "string",
+          "default": "~/worktrees",
+          "description": "Base directory used for default new worktree paths. The create-worktree form defaults to <worktreePrefix>/<groupId>/<newBranchName>."
         }
       }
     }

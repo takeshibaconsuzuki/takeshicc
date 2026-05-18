@@ -18,6 +18,8 @@ interface WorktreesState {
   worktrees: WorktreeEntry[];
   branches: string[];
   currentBranch?: string;
+  groupId: string;
+  worktreePrefix: string;
   error?: string;
 }
 
@@ -134,6 +136,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     private readonly log: vscode.OutputChannel,
     private readonly getServerClient: () => ServerClient | undefined,
     private readonly gitMetadata: GitMetadata,
+    private readonly groupId: string,
   ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -190,14 +193,25 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         worktrees,
         branches: parseBranches(branchesStdout),
         currentBranch: this.gitMetadata.currentBranch,
+        groupId: this.groupId,
+        worktreePrefix: this.worktreePrefix(),
       });
     } catch (err) {
       await this.postState({
         worktrees: [],
         branches: [],
+        groupId: this.groupId,
+        worktreePrefix: this.worktreePrefix(),
         error: this.fail('Could not load worktrees', err),
       });
     }
+  }
+
+  private worktreePrefix(): string {
+    return vscode.workspace
+      .getConfiguration('takeshicc')
+      .get<string>('worktreePrefix', '~/worktrees')
+      .trim();
   }
 
   private async registeredWorktreePaths(): Promise<Set<string>> {
@@ -673,10 +687,16 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     const branchSelectButton = document.getElementById('branchSelectButton');
     const branchSelectValue = document.getElementById('branchSelectValue');
     const branchOptions = document.getElementById('branchOptions');
+    const branchName = document.getElementById('branchName');
     const baseBranch = document.getElementById('baseBranch');
+    const worktreePath = document.getElementById('worktreePath');
     const status = document.getElementById('status');
     let availableBranches = [];
     let currentBranch = '';
+    let groupId = '';
+    let worktreePrefix = '';
+    let worktreePathWasManual = false;
+    let isUpdatingWorktreePath = false;
 
     function setStatus(message, isError = false) {
       status.textContent = message || '';
@@ -715,6 +735,40 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       closeBranchSelect();
     }
 
+    function joinPathParts(parts) {
+      return parts
+        .filter((part) => part.length > 0)
+        .map((part, index) =>
+          index === 0 ? part.replace(/[\\\\/]+$/, '') : part.replace(/^[\\\\/]+|[\\\\/]+$/g, ''),
+        )
+        .join('/');
+    }
+
+    function defaultWorktreePath() {
+      const newBranchName = branchName.value.trim();
+      if (!newBranchName) {
+        return '';
+      }
+      return joinPathParts([worktreePrefix, groupId, newBranchName]);
+    }
+
+    function setWorktreePath(value) {
+      isUpdatingWorktreePath = true;
+      worktreePath.value = value;
+      isUpdatingWorktreePath = false;
+    }
+
+    function updateAutomaticWorktreePath() {
+      if (!branchName.value.trim()) {
+        worktreePathWasManual = false;
+        setWorktreePath('');
+        return;
+      }
+      if (!worktreePathWasManual) {
+        setWorktreePath(defaultWorktreePath());
+      }
+    }
+
     function worktreeLabel(item) {
       if (item.bare) return 'Bare repository';
       if (item.detached) return 'Detached HEAD';
@@ -726,6 +780,9 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       branchOptions.textContent = '';
       availableBranches = state.branches;
       currentBranch = state.currentBranch || '';
+      groupId = state.groupId || '';
+      worktreePrefix = state.worktreePrefix || '';
+      updateAutomaticWorktreePath();
 
       for (const branch of state.branches) {
         const option = document.createElement('li');
@@ -786,6 +843,12 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     openButton.addEventListener('click', openModal);
     closeButton.addEventListener('click', closeModal);
+    branchName.addEventListener('input', updateAutomaticWorktreePath);
+    worktreePath.addEventListener('input', () => {
+      if (!isUpdatingWorktreePath) {
+        worktreePathWasManual = true;
+      }
+    });
     branchSelectButton.addEventListener('click', () => {
       if (branchSelect.classList.contains('open')) {
         closeBranchSelect();
@@ -821,7 +884,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         type: 'create',
         branchName: document.getElementById('branchName').value,
         baseBranch: document.getElementById('baseBranch').value,
-        worktreePath: document.getElementById('worktreePath').value,
+        worktreePath: worktreePath.value,
       });
     });
 
@@ -834,6 +897,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         setBusy(false);
         if (message.ok) {
           form.reset();
+          worktreePathWasManual = false;
+          updateAutomaticWorktreePath();
           setBaseBranch(
             availableBranches.includes(currentBranch) ? currentBranch : availableBranches[0] || '',
           );

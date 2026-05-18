@@ -92,7 +92,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(group)),
     vscode.window.registerWebviewViewProvider(
       WorktreesViewProvider.viewType,
-      new WorktreesViewProvider(log, () => serverClient, gitMetadata),
+      new WorktreesViewProvider(log, () => serverClient, gitMetadata, group.groupId),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
