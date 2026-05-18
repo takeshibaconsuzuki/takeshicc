@@ -645,6 +645,14 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       overflow: auto;
     }
 
+    /* Fills its grid track and lets the list (not the whole body) scroll, so
+       a long worktree list never bleeds into the create form below. */
+    .worktrees-section {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
     .section-title {
       margin: 0 0 8px;
       font-size: 12px;
@@ -659,11 +667,14 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     .worktree-list {
       display: flex;
+      flex: 1;
       flex-direction: column;
       gap: 8px;
+      min-height: 0;
       margin: 0;
       padding: 0;
       list-style: none;
+      overflow-y: auto;
     }
 
     .worktree-item {
@@ -827,6 +838,20 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       display: block;
     }
 
+    /* The popup is absolutely positioned and so clipped by the modal's
+       overflow ancestors. Opened from the bottom-anchored form it would land
+       in that clipped region (reachable only by scrolling the whole body);
+       flipping it above the button keeps it inside the visible dialog. */
+    .select.drop-up .select-list {
+      top: auto;
+      bottom: calc(100% - 1px);
+      border-radius: 4px 4px 0 0;
+    }
+
+    .select.drop-up.open .select-button {
+      border-radius: 0 0 4px 4px;
+    }
+
     .select-option {
       width: 100%;
       border: 0;
@@ -867,7 +892,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         <button id="close" class="icon-button" type="button" aria-label="Close">x</button>
       </header>
       <main class="dialog-body">
-        <section>
+        <section class="worktrees-section">
           <h2 class="section-title">List of worktrees</h2>
           <label class="worktree-search">
             Search worktrees
@@ -960,6 +985,14 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     }
 
     function openBranchSelect() {
+      // Popup max-height (160) + its border/padding. If it won't fit below
+      // but there's more room above, open upward so the modal's overflow
+      // doesn't clip it.
+      const POPUP_HEIGHT = 168;
+      const rect = branchSelectButton.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const dropUp = spaceBelow < POPUP_HEIGHT && rect.top > spaceBelow;
+      branchSelect.classList.toggle('drop-up', dropUp);
       branchSelect.classList.add('open');
       branchSelectButton.setAttribute('aria-expanded', 'true');
     }
