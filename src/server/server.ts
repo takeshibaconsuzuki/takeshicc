@@ -14,9 +14,9 @@ import {
   CreateWorktreeRequest,
   CreateWorktreeResponse,
   HOST,
+  InstanceEventItem,
+  InstanceEventsMessage,
   ROUTES,
-  InstancesResponse,
-  InstancesResponseItem,
   MISSING_WORKTREE_FIELDS_ERROR,
   RegisterRequest,
   WorktreeJobsMessage,
@@ -70,7 +70,7 @@ const groupId = groupIdFor(mainWorktreePath);
 // exits once it has outlived idleTimeoutMs.
 const serverStart = Date.now();
 
-interface Instance extends InstancesResponseItem {
+interface Instance extends InstanceEventItem {
   lastHeartbeatAt: number;
 }
 
@@ -87,17 +87,32 @@ const registry = new Map<string, Instance>();
 // connected.
 const jobs = new Map<string, { worktreePath: string }>();
 
-// Live GET /worktreeJobs streams. A broadcast target: each gets a snapshot
+// Live GET /instance-events streams. A broadcast target: each gets a snapshot
+// on connect, then a delta whenever the registry changes.
+const instanceSubscribers = new Set<express.Response>();
+
+// Live GET /worktree-jobs streams. A broadcast target: each gets a snapshot
 // on connect, then a `done` frame per job as it finishes.
 const jobSubscribers = new Set<express.Response>();
 
 // Nonzero ⇒ an in-flight job (via withServerJob) is running and the server
-// must not idle-exit. A /worktreeJobs subscriber deliberately does *not*
+// must not idle-exit. SSE subscribers deliberately do *not*
 // count: a watching window is already kept alive through its registered
 // instance's heartbeat, and a stream that outlives the registration must not
 // pin a registry-empty server (which would hold its bound port past the
 // intended idle-exit).
 let activeServerJobs = 0;
+
+function instanceSnapshot(): InstanceEventItem[] {
+  return Array.from(registry.values(), ({ groupId, worktreePath }) => ({
+    groupId,
+    worktreePath,
+  }));
+}
+
+function instanceItem(inst: Instance): InstanceEventItem {
+  return { groupId: inst.groupId, worktreePath: inst.worktreePath };
+}
 
 // Drop instances whose heartbeat lapsed past idleTimeoutMs (closed/reloaded/
 // crashed window). A live client beats every idleTimeoutMs/3 — a 3x margin,
@@ -108,6 +123,7 @@ function sweepStaleInstances(): void {
     if (now - inst.lastHeartbeatAt > idleTimeoutMs) {
       registry.delete(id);
       log(`unregistered ${id} (${inst.worktreePath}); heartbeat lapsed; ${registry.size} live`);
+      broadcastInstance({ type: 'unregistered', instance: instanceItem(inst) });
     }
   }
 }
@@ -119,11 +135,20 @@ function withServerJob<T>(job: () => Promise<T>): Promise<T> {
   });
 }
 
-function sseWrite(res: express.Response, message: WorktreeJobsMessage): void {
+function sseWrite(
+  res: express.Response,
+  message: InstanceEventsMessage | WorktreeJobsMessage,
+): void {
   res.write(`data: ${JSON.stringify(message)}\n\n`);
 }
 
-function broadcast(message: WorktreeJobsMessage): void {
+function broadcastInstance(message: InstanceEventsMessage): void {
+  for (const res of instanceSubscribers) {
+    sseWrite(res, message);
+  }
+}
+
+function broadcastJob(message: WorktreeJobsMessage): void {
   for (const res of jobSubscribers) {
     sseWrite(res, message);
   }
@@ -133,7 +158,7 @@ function broadcast(message: WorktreeJobsMessage): void {
 // the job — it is no longer active, so it drops out of future snapshots. The
 // stream itself stays open for subsequent jobs.
 function finishJob(done: Extract<WorktreeJobsMessage, { type: 'done' }>): void {
-  broadcast(done);
+  broadcastJob(done);
   jobs.delete(done.jobId);
 }
 
@@ -247,7 +272,7 @@ async function runWorktreeJob(
     // The worktree now exists on disk; tell every window to list it before the
     // (possibly long) bootstrap runs. The job stays active until bootstrap
     // finishes, so the window can flag it as still in-progress.
-    broadcast({ type: 'created', jobId, worktreePath });
+    broadcastJob({ type: 'created', jobId, worktreePath });
     if (bootstrapCommand) {
       await runBootstrapCommand({
         command: bootstrapCommand,
@@ -287,8 +312,10 @@ app.post(ROUTES.register, (req, res) => {
     res.status(200).json({ status: 'transient', reason: 'worktree already registered' });
     return;
   }
-  registry.set(instanceId, { groupId, worktreePath, lastHeartbeatAt: Date.now() });
+  const instance = { groupId, worktreePath, lastHeartbeatAt: Date.now() };
+  registry.set(instanceId, instance);
   log(`registered ${instanceId} (${worktreePath}); ${registry.size} live`);
+  broadcastInstance({ type: 'registered', instance: instanceItem(instance) });
   res.status(200).json({ status: 'registered', groupId, mainWorktreePath, instanceId });
 });
 
@@ -306,14 +333,19 @@ app.get(ROUTES.ping, (req, res) => {
   res.status(200).send('ok');
 });
 
-app.get(ROUTES.instances, (_req, res) => {
-  const body: InstancesResponse = {
-    instances: Array.from(registry.values(), ({ groupId, worktreePath }) => ({
-      groupId,
-      worktreePath,
-    })),
-  };
-  res.status(200).json(body);
+app.get(ROUTES.instanceEvents, (_req, res) => {
+  res.status(200).set({
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  res.flushHeaders();
+  sseWrite(res, { type: 'snapshot', instances: instanceSnapshot() });
+
+  instanceSubscribers.add(res);
+  res.on('close', () => {
+    instanceSubscribers.delete(res);
+  });
 });
 
 app.post(ROUTES.createWorktree, (req, res) => {

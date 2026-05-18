@@ -4,7 +4,7 @@ import {
   CreateWorktreeRequest,
   CreateWorktreeResponse,
   HOST,
-  InstancesResponse,
+  InstanceEventsMessage,
   ROUTES,
   WorktreeJobsMessage,
 } from '../common/protocol';
@@ -12,18 +12,20 @@ import { lineSplitter } from '../common/lineSplitter';
 import { errMsg } from '../common/errMsg';
 
 const HEARTBEAT_TIMEOUT_MS = 1_000;
-const INSTANCES_TIMEOUT_MS = 1_000;
 const CREATE_WORKTREE_TIMEOUT_MS = 5_000;
 
 // Contract: implementations must clean up before invoking this callback.
 export type DeadConnectionHandler = (reason: string) => void;
 
-// Handle to a live /worktreeJobs subscription: `done` settles when the stream
+// Handle to a live SSE subscription: `done` settles when the stream
 // ends (resolve) or errors (reject); `stop()` tears it down.
-export interface WorktreeJobsStream {
+export interface EventStream {
   stop(): void;
   done: Promise<void>;
 }
+
+export type InstanceEventsStream = EventStream;
+export type WorktreeJobsStream = EventStream;
 
 // A keep-alive client plus heartbeat loop that keeps the server from
 // idle-exiting under a live extension window.
@@ -100,26 +102,6 @@ export class ServerClient {
     });
   }
 
-  // Live instances registered with this server. Used by the worktrees view to
-  // mark which worktrees have an open window.
-  public async instances(): Promise<InstancesResponse> {
-    const { statusCode, parsed } = await this.requestJson<InstancesResponse>(
-      { host: HOST, port: this.port, path: ROUTES.instances, agent: this.agent },
-      { timeoutMs: INSTANCES_TIMEOUT_MS },
-    );
-    if (statusCode < 200 || statusCode >= 300) {
-      throw new Error(`status ${statusCode}`);
-    }
-    return {
-      instances: Array.isArray(parsed.instances)
-        ? parsed.instances.filter(
-            (item): item is { groupId: string; worktreePath: string } =>
-              typeof item?.groupId === 'string' && typeof item.worktreePath === 'string',
-          )
-        : [],
-    };
-  }
-
   // Starts a background worktree-create job and returns its id. The actual
   // work (git + bootstrap) runs server-side and outlives this request, so
   // this is a quick call that can share the keep-alive agent.
@@ -145,6 +127,14 @@ export class ServerClient {
     throw new Error(parsed.error || `status ${statusCode}`);
   }
 
+  // Subscribes to the server's instance-registry stream: `onMessage` gets one
+  // `snapshot` then a delta per registry change.
+  public streamInstanceEvents(
+    onMessage: (message: InstanceEventsMessage) => void,
+  ): InstanceEventsStream {
+    return this.streamJson(ROUTES.instanceEvents, onMessage);
+  }
+
   // Subscribes to the server's active-jobs stream: `onMessage` gets one
   // `snapshot` then an `event` per job event, for as long as the connection
   // lives. It never settles on a job's terminal event — the stream spans all
@@ -154,13 +144,17 @@ export class ServerClient {
   // indefinitely, so it must not borrow the shared maxSockets:1 heartbeat
   // agent.
   public streamWorktreeJobs(onMessage: (message: WorktreeJobsMessage) => void): WorktreeJobsStream {
+    return this.streamJson(ROUTES.worktreeJobs, onMessage);
+  }
+
+  private streamJson<T>(path: string, onMessage: (message: T) => void): EventStream {
     let request: http.ClientRequest | undefined;
     const done = new Promise<void>((resolve, reject) => {
       request = http.get(
         {
           host: HOST,
           port: this.port,
-          path: ROUTES.worktreeJobs,
+          path,
           agent: false,
           headers: { accept: 'text/event-stream' },
         },
@@ -176,7 +170,7 @@ export class ServerClient {
               return;
             }
             try {
-              onMessage(JSON.parse(line.slice(line.indexOf(':') + 1)) as WorktreeJobsMessage);
+              onMessage(JSON.parse(line.slice(line.indexOf(':') + 1)) as T);
             } catch {
               // Ignore a malformed frame; the stream stays usable.
             }

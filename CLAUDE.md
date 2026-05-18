@@ -84,8 +84,9 @@ bootstrapped by `scripts/setup-node.ps1`.
   converges once the offending instance is pruned (freeing the slot to
   re-register with the still-running shared server) or, if it was the sole
   instance, the now-empty server idle-exits and the client respawns one.
-  `GET /instances` exposes a snapshot of this registry so extension UI can
-  show which sibling worktrees currently have a live VS Code window.
+  `GET /instance-events` is the UI feed: a subscriber gets a snapshot of live
+  instances, then register/unregister deltas so sibling-window badges stay
+  current without polling.
 - **Spawned as plain Node** via `process.execPath` + `ELECTRON_RUN_AS_NODE=1`;
   logs to `~/.takeshicc/server-<port>.log`.
 - **Idle/heartbeat.** Per-instance liveness moves *only* on successful
@@ -105,7 +106,7 @@ bootstrapped by `scripts/setup-node.ps1`.
   completion regardless of whether the requester is still connected. Active
   jobs are tracked *parallel to the instance registry* — present while
   running, dropped the moment they finish (no retention) — and each carries
-  the worktree path it will produce. `GET /worktreeJobs` is a single SSE
+  the worktree path it will produce. `GET /worktree-jobs` is a single SSE
   stream spanning all jobs: a subscriber gets a snapshot of the active jobs
   on connect, then per job a `created` once `git worktree add` lands the
   worktree on disk and a `done` (ok / failed) when the whole job finishes.
@@ -140,9 +141,9 @@ stay in sync** with `contributes.commands` / `contributes.views` in
   creates new ones (delegated to the server's background-job + SSE flow
   above — the worktree is listed as soon as it exists on disk and shows a
   spinner until its bootstrap finishes), and opens one in a new
-  window. Worktrees with a live VS Code window are flagged by
-  cross-referencing the server's `/instances` snapshot through
-  `ServerClient`. The view is a self-contained HTML/CSS/JS string with a
+  window. Worktrees with a live VS Code window are flagged from the
+  `/instance-events` stream exposed through `ServerClient`. The view is a
+  self-contained HTML/CSS/JS string with a
   strict CSP; the host side shells out to `git` only for the read-only
   list/branch queries and otherwise posts state — keep the wire `*Message`
   types and the message handlers as the contract between the two halves.

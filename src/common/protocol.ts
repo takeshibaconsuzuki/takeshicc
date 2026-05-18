@@ -10,18 +10,18 @@ export const ROUTES = {
   // handed back from /register; 2xx refreshes liveness, non-2xx means the
   // client should reconnect.
   ping: '/ping',
-  // GET /instances — live VS Code instances currently registered with the
-  // per-repo server. Used by extension UI to indicate active worktrees.
-  instances: '/instances',
+  // GET /instance-events — Server-Sent Events stream of the live instance
+  // registry. A subscriber gets a snapshot, then register/unregister deltas.
+  instanceEvents: '/instance-events',
   // POST /create-worktree — start a background job that creates a linked
   // worktree and runs the optional bootstrap command in it; the job outlives
   // the request and the requesting window. Returns the job id immediately.
   createWorktree: '/create-worktree',
-  // GET /worktreeJobs — Server-Sent Events stream of the server's *active*
+  // GET /worktree-jobs — Server-Sent Events stream of the server's *active*
   // worktree-create jobs (tracked like the instance registry: present while
   // running, dropped when finished). A subscriber gets a snapshot of the
   // running job ids on connect, then a `done` per job as it finishes.
-  worktreeJobs: '/worktreeJobs',
+  worktreeJobs: '/worktree-jobs',
 } as const;
 
 // POST /register — a client's connect handshake. The client announces its
@@ -40,14 +40,18 @@ export type RegisterResponse =
   | { status: 'registered'; groupId: string; mainWorktreePath: string; instanceId: string }
   | { status: 'transient'; reason: string };
 
-export interface InstancesResponseItem {
+export interface InstanceEventItem {
   groupId: string;
   worktreePath: string;
 }
 
-export interface InstancesResponse {
-  instances: InstancesResponseItem[];
-}
+// A frame on the GET /instance-events stream. On connect: one `snapshot` of the
+// live instance registry. Then an event whenever a window registers or is pruned
+// after a heartbeat lapse.
+export type InstanceEventsMessage =
+  | { type: 'snapshot'; instances: InstanceEventItem[] }
+  | { type: 'registered'; instance: InstanceEventItem }
+  | { type: 'unregistered'; instance: InstanceEventItem };
 
 export interface CreateWorktreeRequest {
   branchName: string;
@@ -78,7 +82,7 @@ export interface WorktreeJob {
   worktreePath: string;
 }
 
-// A frame on the GET /worktreeJobs stream. On connect: one `snapshot` of the
+// A frame on the GET /worktree-jobs stream. On connect: one `snapshot` of the
 // active jobs. Then, per job: a `created` once `git worktree add` lands the
 // worktree on disk (bootstrap continues — the list should refresh and show it
 // as in-progress), and finally a `done` when the job finishes (after which the

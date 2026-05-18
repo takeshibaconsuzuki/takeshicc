@@ -6,19 +6,20 @@ import { errMsg } from '../common/errMsg';
 import { COMMANDS } from './commands';
 import { canonicalizePath, type GitMetadata } from '../common/gitUtils';
 import {
+  type InstanceEventsMessage,
   MISSING_WORKTREE_FIELDS_ERROR,
   type WorktreeJob,
   type WorktreeJobsMessage,
 } from '../common/protocol';
-import type { ServerClient, WorktreeJobsStream } from './ServerClient';
+import type { InstanceEventsStream, ServerClient, WorktreeJobsStream } from './ServerClient';
 
 // Base reconnect delay for the active-jobs stream while the view is alive;
 // backs off exponentially up to the max so a server that can't be reached
 // doesn't spin a tight wake loop.
 const STREAM_RECONNECT_MS = 2_000;
 const STREAM_RECONNECT_MAX_MS = 30_000;
-// Coalesces list refreshes triggered by jobs finishing (each refresh shells
-// out to git + an /instances request).
+// Coalesces list refreshes triggered by SSE events (each refresh shells out to
+// git).
 const REFRESH_COALESCE_MS = 300;
 
 interface WorktreeEntry {
@@ -152,19 +153,25 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
   private view?: vscode.WebviewView;
 
-  // The persistent /worktreeJobs subscription and its lifecycle. `streamStopped`
-  // gates (re)connection so a disposed view stops reconnecting.
-  private eventStream?: WorktreeJobsStream;
-  private reconnectTimer?: NodeJS.Timeout;
-  private reconnectAttempts = 0;
+  // Persistent SSE subscriptions and their lifecycle. `streamStopped` gates
+  // (re)connection so a disposed view stops reconnecting.
+  private jobStream?: WorktreeJobsStream;
+  private instanceStream?: InstanceEventsStream;
+  private jobReconnectTimer?: NodeJS.Timeout;
+  private instanceReconnectTimer?: NodeJS.Timeout;
+  private jobReconnectAttempts = 0;
+  private instanceReconnectAttempts = 0;
   private refreshTimer?: NodeJS.Timeout;
   private streamStopped = true;
   // The job the create form is currently showing as in-progress.
   private currentJobId?: string;
   // Canonical paths of worktrees whose server job is still in flight, derived
-  // from the /worktreeJobs stream. `refresh()` flags matching list rows so
+  // from the /worktree-jobs stream. `refresh()` flags matching list rows so
   // every window shows a spinner while a worktree bootstraps.
   private bootstrappingPaths = new Set<string>();
+  // Canonical paths of worktrees with a live VS Code window, derived from the
+  // /instance-events stream.
+  private registeredPaths = new Set<string>();
 
   constructor(
     private readonly log: vscode.OutputChannel,
@@ -183,11 +190,17 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     });
     webviewView.onDidDispose(() => {
       this.streamStopped = true;
-      this.eventStream?.stop();
-      this.eventStream = undefined;
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = undefined;
+      this.jobStream?.stop();
+      this.instanceStream?.stop();
+      this.jobStream = undefined;
+      this.instanceStream = undefined;
+      if (this.jobReconnectTimer) {
+        clearTimeout(this.jobReconnectTimer);
+        this.jobReconnectTimer = undefined;
+      }
+      if (this.instanceReconnectTimer) {
+        clearTimeout(this.instanceReconnectTimer);
+        this.instanceReconnectTimer = undefined;
       }
       if (this.refreshTimer) {
         clearTimeout(this.refreshTimer);
@@ -199,7 +212,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   private async handleMessage(message: WebviewMessage): Promise<void> {
     if (message.type === 'ready') {
       await this.refresh();
-      this.ensureEventStream();
+      this.ensureEventStreams();
       // The webview was (re)created empty; if a create is still in flight,
       // show it as in-progress again (completion arrives via the stream).
       if (this.currentJobId) {
@@ -210,7 +223,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     if (message.type === 'refresh') {
       await this.refresh();
-      this.ensureEventStream();
+      this.ensureEventStreams();
       return;
     }
 
@@ -224,46 +237,89 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private ensureEventStream(): void {
-    if (this.streamStopped || this.eventStream) {
+  private ensureEventStreams(): void {
+    this.ensureJobStream();
+    this.ensureInstanceStream();
+  }
+
+  private ensureJobStream(): void {
+    if (this.streamStopped || this.jobStream) {
       return;
     }
     const serverClient = this.getServerClient();
     if (!serverClient) {
-      this.scheduleStreamReconnect();
+      this.scheduleJobStreamReconnect();
       return;
     }
-    const handle = serverClient.streamWorktreeJobs((message) => this.onStreamMessage(message));
-    this.eventStream = handle;
+    const handle = serverClient.streamWorktreeJobs((message) => this.onJobStreamMessage(message));
+    this.jobStream = handle;
     handle.done
       .catch(() => undefined)
       .finally(() => {
-        if (this.eventStream === handle) {
-          this.eventStream = undefined;
+        if (this.jobStream === handle) {
+          this.jobStream = undefined;
         }
-        this.scheduleStreamReconnect();
+        this.scheduleJobStreamReconnect();
       });
   }
 
-  private scheduleStreamReconnect(): void {
-    if (this.streamStopped || this.reconnectTimer) {
+  private ensureInstanceStream(): void {
+    if (this.streamStopped || this.instanceStream) {
+      return;
+    }
+    const serverClient = this.getServerClient();
+    if (!serverClient) {
+      this.scheduleInstanceStreamReconnect();
+      return;
+    }
+    const handle = serverClient.streamInstanceEvents((message) =>
+      this.onInstanceStreamMessage(message),
+    );
+    this.instanceStream = handle;
+    handle.done
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.instanceStream === handle) {
+          this.instanceStream = undefined;
+        }
+        this.scheduleInstanceStreamReconnect();
+      });
+  }
+
+  private scheduleJobStreamReconnect(): void {
+    if (this.streamStopped || this.jobReconnectTimer) {
       return;
     }
     const delay = Math.min(
-      STREAM_RECONNECT_MS * 2 ** this.reconnectAttempts,
+      STREAM_RECONNECT_MS * 2 ** this.jobReconnectAttempts,
       STREAM_RECONNECT_MAX_MS,
     );
-    this.reconnectAttempts++;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.ensureEventStream();
+    this.jobReconnectAttempts++;
+    this.jobReconnectTimer = setTimeout(() => {
+      this.jobReconnectTimer = undefined;
+      this.ensureJobStream();
     }, delay);
-    this.reconnectTimer.unref?.();
+    this.jobReconnectTimer.unref?.();
   }
 
-  // Coalesces the list refreshes that fan out when jobs finish: a refresh
-  // shells out to two git commands plus an /instances request, and every
-  // subscriber sees every job's `done`.
+  private scheduleInstanceStreamReconnect(): void {
+    if (this.streamStopped || this.instanceReconnectTimer) {
+      return;
+    }
+    const delay = Math.min(
+      STREAM_RECONNECT_MS * 2 ** this.instanceReconnectAttempts,
+      STREAM_RECONNECT_MAX_MS,
+    );
+    this.instanceReconnectAttempts++;
+    this.instanceReconnectTimer = setTimeout(() => {
+      this.instanceReconnectTimer = undefined;
+      this.ensureInstanceStream();
+    }, delay);
+    this.instanceReconnectTimer.unref?.();
+  }
+
+  // Coalesces list refreshes that fan out from SSE events. A refresh shells out
+  // to two git commands, and every subscriber sees every job/instance event.
   private scheduleRefresh(): void {
     if (this.refreshTimer) {
       return;
@@ -275,9 +331,24 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     this.refreshTimer.unref?.();
   }
 
-  private onStreamMessage(message: WorktreeJobsMessage): void {
+  private onInstanceStreamMessage(message: InstanceEventsMessage): void {
+    this.instanceReconnectAttempts = 0;
+
+    if (message.type === 'snapshot') {
+      this.registeredPaths = new Set(
+        message.instances.map((instance) => canonicalizePath(instance.worktreePath)),
+      );
+    } else if (message.type === 'registered') {
+      this.registeredPaths.add(canonicalizePath(message.instance.worktreePath));
+    } else {
+      this.registeredPaths.delete(canonicalizePath(message.instance.worktreePath));
+    }
+    this.scheduleRefresh();
+  }
+
+  private onJobStreamMessage(message: WorktreeJobsMessage): void {
     // Any frame proves a healthy connection — reset the reconnect backoff.
-    this.reconnectAttempts = 0;
+    this.jobReconnectAttempts = 0;
 
     if (message.type === 'snapshot') {
       // Authoritative set of in-flight worktrees (covers a reconnect that
@@ -370,14 +441,13 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
           myWorktreePath,
         ),
       ]);
-      const registeredPaths = await this.registeredWorktreePaths();
       // gitMetadata.worktreePath is already canonical (resolveGitMetadata).
       const worktrees = parseWorktrees(worktreesStdout)
         .map((worktree) => ({ worktree, canonical: canonicalizePath(worktree.path) }))
         .filter(({ canonical }) => canonical !== myWorktreePath)
         .map(({ worktree, canonical }) => ({
           ...worktree,
-          registered: registeredPaths.has(canonical),
+          registered: this.registeredPaths.has(canonical),
           bootstrapping: this.bootstrappingPaths.has(canonical),
         }));
 
@@ -411,21 +481,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       .getConfiguration('takeshicc')
       .get<string>('worktreeBootstrapCommand', '')
       .trim();
-  }
-
-  private async registeredWorktreePaths(): Promise<Set<string>> {
-    const serverClient = this.getServerClient();
-    if (!serverClient) {
-      return new Set();
-    }
-
-    try {
-      const { instances } = await serverClient.instances();
-      return new Set(instances.map((instance) => canonicalizePath(instance.worktreePath)));
-    } catch (err) {
-      this.log.appendLine(`Takeshicc: could not load registered worktrees — ${errMsg(err)}`);
-      return new Set();
-    }
   }
 
   private async createWorktree(message: CreateWorktreeMessage): Promise<void> {
@@ -464,10 +519,10 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         worktreePath: resolvedPath,
         bootstrapCommand: this.worktreeBootstrapCommand(),
       });
-      // Completion arrives over the persistent /worktreeJobs stream
-      // (onStreamMessage), so this returns once the job is started.
+      // Completion arrives over the persistent /worktree-jobs stream
+      // (onJobStreamMessage), so this returns once the job is started.
       this.currentJobId = jobId;
-      this.ensureEventStream();
+      this.ensureEventStreams();
       await this.post({ type: 'createStarted' });
     } catch (err) {
       await this.post({
