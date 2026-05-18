@@ -4,7 +4,12 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { errMsg } from '../common/errMsg';
 import { COMMANDS } from './commands';
-import { canonicalizePath, type GitMetadata } from '../common/gitUtils';
+import {
+  canonicalizePath,
+  parseWorktreeList,
+  type GitMetadata,
+  type WorktreeListEntry,
+} from '../common/gitUtils';
 import {
   type InstanceEventsMessage,
   MISSING_WORKTREE_FIELDS_ERROR,
@@ -22,15 +27,13 @@ const STREAM_RECONNECT_MAX_MS = 30_000;
 // git).
 const REFRESH_COALESCE_MS = 300;
 
-interface WorktreeEntry {
-  path: string;
-  branch?: string;
-  detached: boolean;
-  bare: boolean;
+interface WorktreeEntry extends WorktreeListEntry {
   registered?: boolean;
   // The worktree exists on disk but its bootstrap command is still running
   // (a server job is in flight for this path).
   bootstrapping?: boolean;
+  // The server has accepted a deletion job for this path.
+  deleting?: boolean;
 }
 
 interface WorktreesState {
@@ -47,6 +50,9 @@ type OutboundMessage =
   | { type: 'createStarted' }
   | { type: 'createResult'; ok: boolean; error?: string }
   | { type: 'createDetached' }
+  | { type: 'deleteStarted' }
+  | { type: 'deleteResult'; ok: boolean; error?: string }
+  | { type: 'deleteCancelled' }
   | { type: 'openResult'; ok: false; error: string };
 
 interface CreateWorktreeMessage {
@@ -61,11 +67,20 @@ interface OpenWorktreeMessage {
   worktreePath: string;
 }
 
+interface DeleteWorktreeMessage {
+  type: 'delete';
+  worktreePath: string;
+  // The row's displayed label, shown in the confirm dialog. The server
+  // re-derives the branch authoritatively before deleting.
+  label: string;
+}
+
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
   | CreateWorktreeMessage
-  | OpenWorktreeMessage;
+  | OpenWorktreeMessage
+  | DeleteWorktreeMessage;
 
 function runGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -77,42 +92,6 @@ function runGit(args: string[], cwd: string): Promise<string> {
       }
     });
   });
-}
-
-function parseWorktrees(stdout: string): WorktreeEntry[] {
-  const worktrees: WorktreeEntry[] = [];
-  let current: WorktreeEntry | undefined;
-
-  for (const line of stdout.split(/\r?\n/)) {
-    if (line.length === 0) {
-      current = undefined;
-      continue;
-    }
-    if (line.startsWith('worktree ')) {
-      current = {
-        path: line.slice('worktree '.length),
-        detached: false,
-        bare: false,
-      };
-      worktrees.push(current);
-      continue;
-    }
-    if (!current) {
-      continue;
-    }
-    if (line.startsWith('branch ')) {
-      const branch = line.slice('branch '.length);
-      current.branch = branch.startsWith('refs/heads/')
-        ? branch.slice('refs/heads/'.length)
-        : branch;
-    } else if (line === 'detached') {
-      current.detached = true;
-    } else if (line === 'bare') {
-      current.bare = true;
-    }
-  }
-
-  return worktrees;
 }
 
 function parseBranches(stdout: string): string[] {
@@ -169,9 +148,11 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   // from the /worktree-jobs stream. `refresh()` flags matching list rows so
   // every window shows a spinner while a worktree bootstraps.
   private bootstrappingPaths = new Set<string>();
+  private deletingPaths = new Set<string>();
   // Canonical paths of worktrees with a live VS Code window, derived from the
   // /instance-events stream.
   private registeredPaths = new Set<string>();
+  private currentDeleteJobIds = new Set<string>();
 
   constructor(
     private readonly log: vscode.OutputChannel,
@@ -234,6 +215,11 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     if (message.type === 'open') {
       await this.openWorktree(message.worktreePath);
+      return;
+    }
+
+    if (message.type === 'delete') {
+      await this.deleteWorktree(message.worktreePath, message.label);
     }
   }
 
@@ -355,7 +341,14 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       // missed `created`/`done` frames). Refresh so rows pick up / drop the
       // spinner accordingly.
       this.bootstrappingPaths = new Set(
-        message.jobs.map((job) => canonicalizePath(job.worktreePath)),
+        message.jobs
+          .filter((job) => job.operation === 'create')
+          .map((job) => canonicalizePath(job.worktreePath)),
+      );
+      this.deletingPaths = new Set(
+        message.jobs
+          .filter((job) => job.operation === 'delete')
+          .map((job) => canonicalizePath(job.worktreePath)),
       );
       this.scheduleRefresh();
       this.adoptFromSnapshot(message.jobs);
@@ -371,10 +364,33 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // message.type === 'done' — the job (incl. bootstrap) finished; clear the
-    // spinner and refresh so the list reflects the final state.
-    this.bootstrappingPaths.delete(canonicalizePath(message.worktreePath));
+    if (message.type === 'deleting') {
+      this.deletingPaths.add(canonicalizePath(message.worktreePath));
+      this.scheduleRefresh();
+      return;
+    }
+
+    // message.type === 'done' — the create (incl. bootstrap) or delete job
+    // finished; clear its spinner and refresh to reflect the final state.
+    if (message.operation === 'create') {
+      this.bootstrappingPaths.delete(canonicalizePath(message.worktreePath));
+    } else {
+      this.deletingPaths.delete(canonicalizePath(message.worktreePath));
+    }
     this.scheduleRefresh();
+    if (message.operation === 'delete') {
+      if (!this.currentDeleteJobIds.delete(message.jobId)) {
+        return;
+      }
+      if (message.status === 'ok') {
+        void this.post({ type: 'deleteResult', ok: true });
+      } else {
+        void this.post({ type: 'deleteResult', ok: false, error: message.error });
+        this.notifyDeleteFailure(message.error);
+      }
+      return;
+    }
+
     if (message.jobId !== this.currentJobId) {
       return;
     }
@@ -406,7 +422,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     // No tracked job (fresh host / reload): adopt the most recent active one
     // so its progress shows after a reload.
-    const running = jobIds[jobIds.length - 1];
+    const running = [...jobs].reverse().find((job) => job.operation === 'create')?.jobId;
     if (running) {
       this.currentJobId = running;
       void this.post({ type: 'createStarted' });
@@ -419,6 +435,17 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     this.log.appendLine(`Takeshicc: could not create worktree — ${error}`);
     void vscode.window
       .showErrorMessage(`Takeshicc: could not create worktree — ${error}`, 'Open Server Log')
+      .then((choice) => {
+        if (choice) {
+          void vscode.commands.executeCommand(COMMANDS.openServerLog);
+        }
+      });
+  }
+
+  private notifyDeleteFailure(error: string): void {
+    this.log.appendLine(`Takeshicc: could not delete worktree — ${error}`);
+    void vscode.window
+      .showErrorMessage(`Takeshicc: could not delete worktree — ${error}`, 'Open Server Log')
       .then((choice) => {
         if (choice) {
           void vscode.commands.executeCommand(COMMANDS.openServerLog);
@@ -442,13 +469,14 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         ),
       ]);
       // gitMetadata.worktreePath is already canonical (resolveGitMetadata).
-      const worktrees = parseWorktrees(worktreesStdout)
+      const worktrees = parseWorktreeList(worktreesStdout)
         .map((worktree) => ({ worktree, canonical: canonicalizePath(worktree.path) }))
         .filter(({ canonical }) => canonical !== myWorktreePath)
         .map(({ worktree, canonical }) => ({
           ...worktree,
           registered: this.registeredPaths.has(canonical),
           bootstrapping: this.bootstrappingPaths.has(canonical),
+          deleting: this.deletingPaths.has(canonical),
         }));
 
       await this.postState({
@@ -548,6 +576,46 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         type: 'openResult',
         ok: false,
         error: this.fail('Could not open worktree', err),
+      });
+    }
+  }
+
+  private async deleteWorktree(worktreePath: string, label: string): Promise<void> {
+    if (!worktreePath) {
+      return;
+    }
+
+    const choice = await vscode.window.showWarningMessage(
+      `Delete worktree "${label}" and its branch? This cannot be undone.`,
+      { modal: true },
+      'Delete',
+    );
+    if (choice !== 'Delete') {
+      await this.post({ type: 'deleteCancelled' });
+      return;
+    }
+
+    try {
+      const serverClient = this.getServerClient();
+      if (!serverClient) {
+        throw new Error('Takeshicc server is not connected.');
+      }
+      if (this.registeredPaths.has(canonicalizePath(worktreePath))) {
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(worktreePath), {
+          forceNewWindow: true,
+        });
+      }
+      const jobId = await serverClient.deleteWorktree({ worktreePath });
+      this.currentDeleteJobIds.add(jobId);
+      this.deletingPaths.add(canonicalizePath(worktreePath));
+      this.ensureEventStreams();
+      this.scheduleRefresh();
+      await this.post({ type: 'deleteStarted' });
+    } catch (err) {
+      await this.post({
+        type: 'deleteResult',
+        ok: false,
+        error: this.fail('Could not delete worktree', err),
       });
     }
   }
@@ -761,6 +829,17 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       overflow-y: auto;
     }
 
+    .worktree-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 28px;
+      gap: 0;
+      align-items: stretch;
+    }
+
+    .worktree-row.deleting {
+      pointer-events: none;
+    }
+
     .worktree-item {
       display: flex;
       align-items: center;
@@ -768,7 +847,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       gap: 8px;
       width: 100%;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 6px 0 0 6px;
       padding: 8px;
       color: var(--vscode-foreground);
       background: var(--vscode-sideBar-background);
@@ -776,11 +855,17 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       cursor: pointer;
     }
 
-    .worktree-item:hover {
+    .worktree-item:disabled,
+    .delete-worktree:disabled {
+      cursor: default;
+      opacity: 0.7;
+    }
+
+    .worktree-item:not(:disabled):hover {
       background: var(--vscode-list-hoverBackground);
     }
 
-    .worktree-item:focus {
+    .worktree-item:not(:disabled):focus {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: -1px;
     }
@@ -808,6 +893,29 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       border-top-color: transparent;
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
+    }
+
+    .delete-worktree {
+      align-self: stretch;
+      width: 28px;
+      height: auto;
+      border: 1px solid var(--border);
+      border-left: 0;
+      border-radius: 0 6px 6px 0;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .delete-worktree:not(:disabled):hover {
+      color: var(--vscode-errorForeground);
+      background: var(--vscode-list-hoverBackground);
+    }
+
+    .delete-worktree:disabled:hover,
+    .worktree-row.deleting .worktree-item,
+    .worktree-row.deleting .delete-worktree {
+      color: var(--vscode-foreground);
+      background: var(--vscode-sideBar-background);
+      outline: none;
     }
 
     @keyframes spin {
@@ -1180,10 +1288,13 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
       for (const item of visibleWorktrees) {
         const listItem = document.createElement('li');
+        listItem.className = 'worktree-row';
+        listItem.classList.toggle('deleting', Boolean(item.deleting));
         const row = document.createElement('button');
         row.className = 'worktree-item';
         row.type = 'button';
         row.title = item.path;
+        row.disabled = Boolean(item.deleting);
         row.addEventListener('click', () => {
           closeModal();
           vscode.postMessage({ type: 'open', worktreePath: item.path });
@@ -1194,11 +1305,11 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         branch.textContent = worktreeLabel(item);
 
         row.append(branch);
-        if (item.bootstrapping) {
+        if (item.bootstrapping || item.deleting) {
           const spinner = document.createElement('span');
           spinner.className = 'bootstrapping-spinner';
-          spinner.title = 'Bootstrapping';
-          spinner.setAttribute('aria-label', 'Bootstrapping');
+          spinner.title = item.deleting ? 'Deleting' : 'Bootstrapping';
+          spinner.setAttribute('aria-label', item.deleting ? 'Deleting' : 'Bootstrapping');
           spinner.setAttribute('role', 'status');
           row.appendChild(spinner);
         }
@@ -1209,7 +1320,23 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
           indicator.setAttribute('aria-label', 'Registered');
           row.appendChild(indicator);
         }
-        listItem.appendChild(row);
+
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'icon-button delete-worktree';
+        deleteButton.type = 'button';
+        deleteButton.textContent = '×';
+        deleteButton.title = 'Delete worktree';
+        deleteButton.setAttribute('aria-label', 'Delete worktree');
+        deleteButton.disabled = Boolean(item.bootstrapping || item.deleting);
+        deleteButton.addEventListener('click', () => {
+          vscode.postMessage({
+            type: 'delete',
+            worktreePath: item.path,
+            label: worktreeLabel(item),
+          });
+        });
+
+        listItem.append(row, deleteButton);
         worktrees.appendChild(listItem);
       }
     }
@@ -1331,6 +1458,19 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'openResult' && !message.ok) {
         setStatus(message.error, true);
+      }
+      if (message.type === 'deleteStarted') {
+        setStatus('Deleting worktree...');
+      }
+      if (message.type === 'deleteResult') {
+        if (message.ok) {
+          setStatus('Worktree deleted.');
+        } else {
+          setStatus(message.error, true);
+        }
+      }
+      if (message.type === 'deleteCancelled') {
+        setStatus('');
       }
     });
 

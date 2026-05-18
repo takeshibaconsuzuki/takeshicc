@@ -2,10 +2,12 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import {
   CreateWorktreeRequest,
-  CreateWorktreeResponse,
+  DeleteWorktreeRequest,
   HOST,
+  InstanceCommandMessage,
   InstanceEventsMessage,
   ROUTES,
+  UnregisterRequest,
   WorktreeJobsMessage,
 } from '../common/protocol';
 import { lineSplitter } from '../common/lineSplitter';
@@ -13,6 +15,10 @@ import { errMsg } from '../common/errMsg';
 
 const HEARTBEAT_TIMEOUT_MS = 1_000;
 const CREATE_WORKTREE_TIMEOUT_MS = 5_000;
+const DELETE_WORKTREE_TIMEOUT_MS = 5_000;
+const UNREGISTER_TIMEOUT_MS = 1_000;
+const COMMAND_RECONNECT_MS = 1_000;
+const COMMAND_RECONNECT_MAX_MS = 30_000;
 
 // Contract: implementations must clean up before invoking this callback.
 export type DeadConnectionHandler = (reason: string) => void;
@@ -38,12 +44,16 @@ export class ServerClient {
   private readonly timer: NodeJS.Timeout;
   private closed = false;
   private failedSinceMs: number | undefined;
+  private commandStream?: EventStream;
+  private commandReconnectTimer?: NodeJS.Timeout;
+  private commandReconnectAttempts = 0;
+  private commandHandler?: (message: InstanceCommandMessage) => void;
 
   constructor(
     port: number,
     groupId: string,
     private readonly idleTimeoutMs: number,
-    instanceId: string,
+    private readonly instanceId: string,
     private readonly log: vscode.OutputChannel,
     private readonly onDeadConnection: DeadConnectionHandler,
   ) {
@@ -64,7 +74,30 @@ export class ServerClient {
     }
     this.closed = true;
     clearInterval(this.timer);
+    if (this.commandReconnectTimer) {
+      clearTimeout(this.commandReconnectTimer);
+      this.commandReconnectTimer = undefined;
+    }
+    this.commandStream?.stop();
+    this.commandStream = undefined;
     this.agent.destroy();
+  }
+
+  public async unregisterAndClose(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    try {
+      await this.postJson<{ ok: boolean }>(
+        ROUTES.unregister,
+        { instanceId: this.instanceId } satisfies UnregisterRequest,
+        UNREGISTER_TIMEOUT_MS,
+      );
+    } catch (err) {
+      this.log.appendLine(`Takeshicc: unregister failed — ${errMsg(err)}`);
+    } finally {
+      this.close();
+    }
   }
 
   // One HTTP round-trip that collects the body and JSON-parses it. A non-JSON
@@ -102,16 +135,18 @@ export class ServerClient {
     });
   }
 
-  // Starts a background worktree-create job and returns its id. The actual
-  // work (git + bootstrap) runs server-side and outlives this request, so
-  // this is a quick call that can share the keep-alive agent.
-  public async createWorktree(request: CreateWorktreeRequest): Promise<string> {
-    const payload = JSON.stringify(request);
-    const { statusCode, parsed } = await this.requestJson<CreateWorktreeResponse>(
+  // POST a JSON body and return the parsed response (statusCode + body).
+  private postJson<T>(
+    path: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<{ statusCode: number; parsed: Partial<T> }> {
+    const payload = JSON.stringify(body);
+    return this.requestJson<T>(
       {
         host: HOST,
         port: this.port,
-        path: ROUTES.createWorktree,
+        path,
         method: 'POST',
         agent: this.agent,
         headers: {
@@ -119,12 +154,36 @@ export class ServerClient {
           'content-length': Buffer.byteLength(payload),
         },
       },
-      { payload, timeoutMs: CREATE_WORKTREE_TIMEOUT_MS },
+      { payload, timeoutMs },
+    );
+  }
+
+  // POST a request that starts a background job and returns its id. The work
+  // runs server-side and outlives the request, so this is a quick call that
+  // can share the keep-alive agent.
+  private async postJob(path: string, body: unknown, timeoutMs: number): Promise<string> {
+    const { statusCode, parsed } = await this.postJson<{ jobId?: string; error?: string }>(
+      path,
+      body,
+      timeoutMs,
     );
     if (statusCode >= 200 && statusCode < 300 && typeof parsed.jobId === 'string') {
       return parsed.jobId;
     }
     throw new Error(parsed.error || `status ${statusCode}`);
+  }
+
+  public createWorktree(request: CreateWorktreeRequest): Promise<string> {
+    return this.postJob(ROUTES.createWorktree, request, CREATE_WORKTREE_TIMEOUT_MS);
+  }
+
+  public deleteWorktree(request: DeleteWorktreeRequest): Promise<string> {
+    return this.postJob(ROUTES.deleteWorktree, request, DELETE_WORKTREE_TIMEOUT_MS);
+  }
+
+  public startInstanceCommandStream(handler: (message: InstanceCommandMessage) => void): void {
+    this.commandHandler = handler;
+    this.ensureInstanceCommandStream();
   }
 
   // Subscribes to the server's instance-registry stream: `onMessage` gets one
@@ -186,6 +245,42 @@ export class ServerClient {
       request.on('error', reject);
     });
     return { stop: () => request?.destroy(), done };
+  }
+
+  private ensureInstanceCommandStream(): void {
+    if (this.closed || this.commandStream || !this.commandHandler) {
+      return;
+    }
+    const path = `${ROUTES.instanceCommands}?instanceId=${encodeURIComponent(this.instanceId)}`;
+    const handle = this.streamJson<InstanceCommandMessage>(path, (message) => {
+      this.commandReconnectAttempts = 0;
+      this.commandHandler?.(message);
+    });
+    this.commandStream = handle;
+    handle.done
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.commandStream === handle) {
+          this.commandStream = undefined;
+        }
+        this.scheduleInstanceCommandReconnect();
+      });
+  }
+
+  private scheduleInstanceCommandReconnect(): void {
+    if (this.closed || this.commandReconnectTimer || !this.commandHandler) {
+      return;
+    }
+    const delay = Math.min(
+      COMMAND_RECONNECT_MS * 2 ** this.commandReconnectAttempts,
+      COMMAND_RECONNECT_MAX_MS,
+    );
+    this.commandReconnectAttempts++;
+    this.commandReconnectTimer = setTimeout(() => {
+      this.commandReconnectTimer = undefined;
+      this.ensureInstanceCommandStream();
+    }, delay);
+    this.commandReconnectTimer.unref?.();
   }
 
   private markFailed(reason: string): void {

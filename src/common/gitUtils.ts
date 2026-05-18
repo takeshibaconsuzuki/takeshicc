@@ -35,6 +35,48 @@ export function instanceIdFor(worktreePath: string): string {
   return `instance_${pathId(worktreePath)}`;
 }
 
+export interface WorktreeListEntry {
+  // Path exactly as `git worktree list --porcelain` reported it — not
+  // canonicalized, since callers compare via canonicalizePath where needed.
+  path: string;
+  branch?: string;
+  detached: boolean;
+  bare: boolean;
+}
+
+// Parses `git worktree list --porcelain` output. A blank line ends a record;
+// in practice only a checked-out local branch emits `branch refs/heads/…`,
+// detached emits `detached`, and the bare main worktree emits `bare`.
+export function parseWorktreeList(stdout: string): WorktreeListEntry[] {
+  const worktrees: WorktreeListEntry[] = [];
+  let current: WorktreeListEntry | undefined;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.length === 0) {
+      current = undefined;
+      continue;
+    }
+    if (line.startsWith('worktree ')) {
+      current = { path: line.slice('worktree '.length), detached: false, bare: false };
+      worktrees.push(current);
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    if (line.startsWith('branch ')) {
+      const ref = line.slice('branch '.length);
+      current.branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
+    } else if (line === 'detached') {
+      current.detached = true;
+    } else if (line === 'bare') {
+      current.bare = true;
+    }
+  }
+
+  return worktrees;
+}
+
 function runGit(args: string[], cwd: string): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
     execFile('git', args, { cwd }, (err, stdout) => {

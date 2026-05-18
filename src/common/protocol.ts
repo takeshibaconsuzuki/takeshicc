@@ -17,6 +17,16 @@ export const ROUTES = {
   // worktree and runs the optional bootstrap command in it; the job outlives
   // the request and the requesting window. Returns the job id immediately.
   createWorktree: '/create-worktree',
+  // POST /delete-worktree — start a background job that closes any live
+  // instance for a linked worktree, removes the worktree, then deletes its
+  // branch. Returns the job id immediately.
+  deleteWorktree: '/delete-worktree',
+  // POST /unregister — explicit client shutdown notification. This avoids
+  // waiting for heartbeat expiry when a window quits normally.
+  unregister: '/unregister',
+  // GET /instance-commands?instanceId=<id> — Server-Sent Events stream of
+  // commands addressed to one registered instance.
+  instanceCommands: '/instance-commands',
   // GET /worktree-jobs — Server-Sent Events stream of the server's *active*
   // worktree-create jobs (tracked like the instance registry: present while
   // running, dropped when finished). A subscriber gets a snapshot of the
@@ -60,6 +70,14 @@ export interface CreateWorktreeRequest {
   bootstrapCommand: string;
 }
 
+export interface DeleteWorktreeRequest {
+  worktreePath: string;
+}
+
+export interface UnregisterRequest {
+  instanceId: string;
+}
+
 // Rejection when required fields are missing. The server is the authority
 // (it re-validates untrusted input); the client pre-checks with the same
 // message to skip a round-trip — one source so the two can't drift.
@@ -74,12 +92,22 @@ export interface CreateWorktreeResponse {
   error?: string;
 }
 
+export interface DeleteWorktreeResponse {
+  jobId?: string;
+  error?: string;
+}
+
+export type InstanceCommandMessage = { type: 'quit'; worktreePath: string };
+
 // An in-flight worktree-create job, identified by the worktree it produces so
 // every window can list that worktree (with a progress indicator) before its
 // bootstrap finishes — `jobId` stays the addressable token on the stream.
+export type WorktreeJobOperation = 'create' | 'delete';
+
 export interface WorktreeJob {
   jobId: string;
   worktreePath: string;
+  operation: WorktreeJobOperation;
 }
 
 // A frame on the GET /worktree-jobs stream. On connect: one `snapshot` of the
@@ -88,8 +116,13 @@ export interface WorktreeJob {
 // as in-progress), and finally a `done` when the job finishes (after which the
 // server stops tracking it). The bootstrap output is not streamed — it goes to
 // the server log; `error` is the summary to surface, the log has detail.
+export type WorktreeJobDone = WorktreeJob & { type: 'done' } & (
+    | { status: 'ok' }
+    | { status: 'failed'; error: string }
+  );
+
 export type WorktreeJobsMessage =
   | { type: 'snapshot'; jobs: WorktreeJob[] }
   | { type: 'created'; jobId: string; worktreePath: string }
-  | { type: 'done'; jobId: string; worktreePath: string; status: 'ok' }
-  | { type: 'done'; jobId: string; worktreePath: string; status: 'failed'; error: string };
+  | { type: 'deleting'; jobId: string; worktreePath: string }
+  | WorktreeJobDone;

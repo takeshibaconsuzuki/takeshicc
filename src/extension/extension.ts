@@ -32,6 +32,26 @@ function startServerSupervisor(
       serverClient = await getOrCreateServer(context, log, group, (deadReason) => {
         void connect(deadReason);
       });
+      serverClient?.startInstanceCommandStream((message) => {
+        if (message.type !== 'quit') {
+          return;
+        }
+        if (message.worktreePath !== group.worktreePath) {
+          log.appendLine(
+            `Takeshicc: ignored quit request for ${message.worktreePath}; ` +
+              `current worktree is ${group.worktreePath}.`,
+          );
+          return;
+        }
+        log.appendLine(`Takeshicc: quit requested for ${message.worktreePath}.`);
+        void (async () => {
+          try {
+            await vscode.commands.executeCommand('workbench.action.closeWindow');
+          } catch (err) {
+            log.appendLine(`Takeshicc: could not close target window — ${errMsg(err)}`);
+          }
+        })();
+      });
     } catch (err) {
       log.appendLine(
         `Takeshicc: getOrCreateServer threw — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
@@ -109,8 +129,9 @@ export async function activate(context: vscode.ExtensionContext) {
   startServerSupervisor(context, log, group);
 }
 
-export function deactivate() {
+export async function deactivate(): Promise<void> {
   deactivated = true;
-  // The server idle-exits on its own; close() just stops our heartbeat.
-  serverClient?.close();
+  // The server idle-exits on its own; unregister just lets deletion jobs move
+  // immediately instead of waiting for heartbeat expiry.
+  await serverClient?.unregisterAndClose();
 }
