@@ -15,7 +15,8 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:takeshicc.worktreesView"
   ],
   "contributes": {
     "commands": [
@@ -40,6 +41,24 @@
         "category": "Takeshicc"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "takeshicc-sidebar",
+          "title": "Takeshicc",
+          "icon": "media/takeshicc.svg"
+        }
+      ]
+    },
+    "views": {
+      "takeshicc-sidebar": [
+        {
+          "id": "takeshicc.worktreesView",
+          "name": "Takeshicc",
+          "type": "webview"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "takeshicc.pasteFileRef",

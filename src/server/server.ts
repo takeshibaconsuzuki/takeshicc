@@ -8,7 +8,13 @@
 // registers.
 
 import express = require('express');
-import { HOST, ROUTES, RegisterRequest } from '../common/protocol';
+import {
+  HOST,
+  ROUTES,
+  InstancesResponse,
+  InstancesResponseItem,
+  RegisterRequest,
+} from '../common/protocol';
 import { groupIdFor, instanceIdFor } from '../common/gitUtils';
 
 const IDLE_CHECK_MS = 5_000;
@@ -51,8 +57,7 @@ const groupId = groupIdFor(mainWorktreePath);
 // exits once it has outlived idleTimeoutMs.
 const serverStart = Date.now();
 
-interface Instance {
-  worktreePath: string;
+interface Instance extends InstancesResponseItem {
   lastHeartbeatAt: number;
 }
 
@@ -98,7 +103,7 @@ app.post(ROUTES.register, (req, res) => {
     res.status(200).json({ status: 'transient', reason: 'worktree already registered' });
     return;
   }
-  registry.set(instanceId, { worktreePath, lastHeartbeatAt: Date.now() });
+  registry.set(instanceId, { groupId, worktreePath, lastHeartbeatAt: Date.now() });
   log(`registered ${instanceId} (${worktreePath}); ${registry.size} live`);
   res.status(200).json({ status: 'registered', groupId, mainWorktreePath, instanceId });
 });
@@ -115,6 +120,16 @@ app.get(ROUTES.ping, (req, res) => {
   }
   inst.lastHeartbeatAt = Date.now();
   res.status(200).send('ok');
+});
+
+app.get(ROUTES.instances, (_req, res) => {
+  const body: InstancesResponse = {
+    instances: Array.from(registry.values(), ({ groupId, worktreePath }) => ({
+      groupId,
+      worktreePath,
+    })),
+  };
+  res.status(200).json(body);
 });
 
 app.use((req, res) => {

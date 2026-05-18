@@ -5,6 +5,7 @@ import { registerPasteFileRef } from './pasteFileRef';
 import { getOrCreateServer, openServerLog } from './getOrCreateServer';
 import { COMMANDS } from './commands';
 import type { ServerClient } from './ServerClient';
+import { WorktreesViewProvider } from './worktreesView';
 
 let serverClient: ServerClient | undefined;
 let reconnecting = false;
@@ -47,6 +48,11 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand(COMMANDS.applyLayout, () => applyLayout(context)),
     vscode.commands.registerCommand(COMMANDS.openConfig, () => openConfig()),
     vscode.commands.registerCommand(COMMANDS.openServerLog, () => openServerLog(log)),
+    vscode.window.registerWebviewViewProvider(
+      WorktreesViewProvider.viewType,
+      new WorktreesViewProvider(log, () => serverClient),
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
   );
   registerPasteFileRef(context);
 

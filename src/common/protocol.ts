@@ -10,6 +10,9 @@ export const ROUTES = {
   // handed back from /register; 2xx refreshes liveness, non-2xx means the
   // client should reconnect.
   ping: '/ping',
+  // GET /instances — live VS Code instances currently registered with the
+  // per-repo server. Used by extension UI to indicate active worktrees.
+  instances: '/instances',
 } as const;
 
 // POST /register — a client's connect handshake. The client announces its
@@ -27,3 +30,12 @@ export interface RegisterRequest {
 export type RegisterResponse =
   | { status: 'registered'; groupId: string; mainWorktreePath: string; instanceId: string }
   | { status: 'transient'; reason: string };
+
+export interface InstancesResponseItem {
+  groupId: string;
+  worktreePath: string;
+}
+
+export interface InstancesResponse {
+  instances: InstancesResponseItem[];
+}
