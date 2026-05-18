@@ -462,6 +462,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       await this.postState({
         worktrees: [],
         branches: [],
+        currentBranch: this.gitMetadata.currentBranch,
         groupId: this.groupId,
         worktreePrefix: this.worktreePrefix(),
         error: this.fail('Could not load worktrees', err),
@@ -586,6 +587,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       color-scheme: light dark;
       --gap: 12px;
       --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
+      --modal-top: 0px;
     }
 
     * {
@@ -624,6 +626,33 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-button-hoverBackground);
     }
 
+    .current-worktree {
+      position: relative;
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+      z-index: 2;
+    }
+
+    .current-worktree-label {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .current-worktree-branch {
+      min-width: 0;
+      color: var(--vscode-sideBarTitle-foreground, var(--vscode-foreground));
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .secondary-button {
       width: auto;
       color: var(--vscode-button-secondaryForeground);
@@ -636,7 +665,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     .modal {
       position: fixed;
-      inset: 0;
+      inset: var(--modal-top) 0 0;
       display: none;
       align-items: stretch;
       justify-content: stretch;
@@ -938,6 +967,10 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
+  <div id="currentWorktree" class="current-worktree" aria-label="Current worktree branch">
+    <div class="current-worktree-label">Branch</div>
+    <div id="currentBranch" class="current-worktree-branch">Loading...</div>
+  </div>
   <button id="open" class="primary-button" type="button">Worktrees</button>
 
   <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="title">
@@ -994,6 +1027,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${scriptNonce}">
     const vscode = acquireVsCodeApi();
     const openButton = document.getElementById('open');
+    const currentWorktree = document.getElementById('currentWorktree');
+    const currentBranchLabel = document.getElementById('currentBranch');
     const closeButton = document.getElementById('close');
     const modal = document.getElementById('modal');
     const form = document.getElementById('form');
@@ -1027,7 +1062,17 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       createButton.textContent = isBusy ? 'Creating...' : 'Create';
     }
 
+    function currentBranchText() {
+      return currentBranch || 'Detached HEAD';
+    }
+
+    function updateModalTop() {
+      const rect = currentWorktree.getBoundingClientRect();
+      document.documentElement.style.setProperty('--modal-top', Math.ceil(rect.bottom + 8) + 'px');
+    }
+
     function openModal() {
+      updateModalTop();
       modal.classList.add('open');
       requestAnimationFrame(() => worktreeSearch.focus());
       setStatus('Loading...');
@@ -1175,6 +1220,9 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       worktreesError = state.error || '';
       availableBranches = state.branches;
       currentBranch = state.currentBranch || '';
+      currentBranchLabel.textContent = currentBranchText();
+      currentBranchLabel.title = currentBranchText();
+      updateModalTop();
       groupId = state.groupId || '';
       worktreePrefix = state.worktreePrefix || '';
       updateAutomaticWorktreePath();
@@ -1206,6 +1254,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
 
     openButton.addEventListener('click', openModal);
     closeButton.addEventListener('click', closeModal);
+    window.addEventListener('resize', updateModalTop);
+    new ResizeObserver(updateModalTop).observe(currentWorktree);
     worktreeSearch.addEventListener('input', renderWorktrees);
     branchName.addEventListener('input', updateAutomaticWorktreePath);
     worktreePath.addEventListener('input', () => {
