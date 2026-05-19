@@ -4,6 +4,7 @@ import { openConfig } from './openConfig';
 import { registerPasteFileRef } from './pasteFileRef';
 import { getOrCreateServer, openServerLog } from './getOrCreateServer';
 import { COMMANDS } from './commands';
+import { mergeClaudeHttpHooks } from './claudeHooks';
 import type { ServerClient } from './ServerClient';
 import { WorktreesViewProvider } from './worktreesView';
 import { resolveGitMetadata, type GitMetadata } from '../common/gitUtils';
@@ -106,6 +107,18 @@ export async function activate(context: vscode.ExtensionContext) {
       `Takeshicc: group "${gitMetadata.mainWorktreePath}" not found in ${CONFIG_PATH}.`,
     );
     return;
+  }
+
+  try {
+    const changed = mergeClaudeHttpHooks(gitMetadata.worktreePath, group.port);
+    log.appendLine(
+      `Takeshicc: Claude HTTP hooks ${changed ? 'merged into' : 'already present in'} ` +
+        `${gitMetadata.worktreePath}/.claude/settings.local.json.`,
+    );
+  } catch (err) {
+    const message = `Takeshicc: could not merge Claude HTTP hooks — ${errMsg(err)}`;
+    log.appendLine(message);
+    vscode.window.showWarningMessage(message);
   }
 
   context.subscriptions.push(

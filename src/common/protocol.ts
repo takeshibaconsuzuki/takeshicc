@@ -32,6 +32,12 @@ export const ROUTES = {
   // running, dropped when finished). A subscriber gets a snapshot of the
   // running job ids on connect, then a `done` per job as it finishes.
   worktreeJobs: '/worktree-jobs',
+  // POST /claude/update-chat-state — Claude Code HTTP hook receiver. Accepts
+  // hook payloads and updates the server's per-session chat state.
+  claudeUpdateChatState: '/claude/update-chat-state',
+  // GET /live-chats — Server-Sent Events stream of live Claude chat states.
+  // A subscriber gets a snapshot, then an update whenever a hook changes one.
+  liveChats: '/live-chats',
 } as const;
 
 // POST /register — a client's connect handshake. The client announces its
@@ -126,3 +132,14 @@ export type WorktreeJobsMessage =
   | { type: 'created'; jobId: string; worktreePath: string }
   | { type: 'deleting'; jobId: string; worktreePath: string }
   | WorktreeJobDone;
+
+export type ChatState = 'idle' | 'busy';
+
+export interface LiveChat {
+  chatId: string;
+  state: ChatState;
+}
+
+export type LiveChatsMessage =
+  | { type: 'snapshot'; chats: LiveChat[] }
+  | { type: 'updated'; chat: LiveChat };

@@ -6,6 +6,7 @@ import {
   HOST,
   InstanceCommandMessage,
   InstanceEventsMessage,
+  LiveChatsMessage,
   ROUTES,
   UnregisterRequest,
   WorktreeJobsMessage,
@@ -32,6 +33,7 @@ export interface EventStream {
 
 export type InstanceEventsStream = EventStream;
 export type WorktreeJobsStream = EventStream;
+export type LiveChatsStream = EventStream;
 
 // A keep-alive client plus heartbeat loop that keeps the server from
 // idle-exiting under a live extension window.
@@ -204,6 +206,10 @@ export class ServerClient {
   // agent.
   public streamWorktreeJobs(onMessage: (message: WorktreeJobsMessage) => void): WorktreeJobsStream {
     return this.streamJson(ROUTES.worktreeJobs, onMessage);
+  }
+
+  public streamLiveChats(onMessage: (message: LiveChatsMessage) => void): LiveChatsStream {
+    return this.streamJson(ROUTES.liveChats, onMessage);
   }
 
   private streamJson<T>(path: string, onMessage: (message: T) => void): EventStream {

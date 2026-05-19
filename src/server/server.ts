@@ -19,10 +19,13 @@ import {
   InstanceCommandMessage,
   InstanceEventItem,
   InstanceEventsMessage,
+  LiveChat,
+  LiveChatsMessage,
   ROUTES,
   MISSING_WORKTREE_FIELDS_ERROR,
   RegisterRequest,
   UnregisterRequest,
+  ChatState,
   WorktreeJobOperation,
   WorktreeJobsMessage,
 } from '../common/protocol';
@@ -120,6 +123,14 @@ const instanceSubscribers = new Set<express.Response>();
 // on connect, then a `done` frame per job as it finishes.
 const jobSubscribers = new Set<express.Response>();
 
+// Live GET /live-chats streams. A broadcast target: each gets a snapshot of
+// the known Claude Code sessions, then an update when a hook changes state.
+const chatSubscribers = new Set<express.Response>();
+
+// Claude Code chat state keyed by session_id. Entries live for this server
+// process and are rebuilt from hooks after restart.
+const chats = new Map<string, LiveChat>();
+
 // Per-instance command delivery, all keyed by instanceId: the live
 // /instance-commands SSE streams; commands queued while no stream is connected
 // (replayed and dropped on the next connect); and resolvers waiting for an
@@ -194,7 +205,7 @@ function withServerJob<T>(job: () => Promise<T>): Promise<T> {
 
 function sseWrite(
   res: express.Response,
-  message: InstanceCommandMessage | InstanceEventsMessage | WorktreeJobsMessage,
+  message: InstanceCommandMessage | InstanceEventsMessage | WorktreeJobsMessage | LiveChatsMessage,
 ): void {
   res.write(`data: ${JSON.stringify(message)}\n\n`);
 }
@@ -209,6 +220,16 @@ function broadcastJob(message: WorktreeJobsMessage): void {
   for (const res of jobSubscribers) {
     sseWrite(res, message);
   }
+}
+
+function broadcastChat(message: LiveChatsMessage): void {
+  for (const res of chatSubscribers) {
+    sseWrite(res, message);
+  }
+}
+
+function chatSnapshot(): LiveChat[] {
+  return Array.from(chats.values()).sort((a, b) => a.chatId.localeCompare(b.chatId));
 }
 
 function jobSnapshot() {
@@ -292,6 +313,110 @@ function runGit(args: string[], cwd: string): Promise<string> {
 
 function trimStr(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+const CLAUDE_HOOK_EVENT_NAMES = [
+  'SessionStart',
+  'Setup',
+  'InstructionsLoaded',
+  'UserPromptSubmit',
+  'UserPromptExpansion',
+  'PreToolUse',
+  'PermissionRequest',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PostToolBatch',
+  'PermissionDenied',
+  'Notification',
+  'SubagentStart',
+  'SubagentStop',
+  'TaskCreated',
+  'TaskCompleted',
+  'Stop',
+  'StopFailure',
+  'TeammateIdle',
+  'ConfigChange',
+  'CwdChanged',
+  'FileChanged',
+  'WorktreeCreate',
+  'WorktreeRemove',
+  'PreCompact',
+  'PostCompact',
+  'SessionEnd',
+  'Elicitation',
+  'ElicitationResult',
+] as const;
+
+type ClaudeHookEventName = (typeof CLAUDE_HOOK_EVENT_NAMES)[number];
+type HookTransition = ChatState | 'unchanged';
+
+function isClaudeHookEventName(value: string): value is ClaudeHookEventName {
+  return (CLAUDE_HOOK_EVENT_NAMES as readonly string[]).includes(value);
+}
+
+function notificationType(payload: Record<string, unknown>): string {
+  return typeof payload.notification_type === 'string' ? payload.notification_type : '';
+}
+
+function transitionForClaudeHook(
+  eventName: ClaudeHookEventName,
+  payload: Record<string, unknown>,
+): HookTransition {
+  switch (eventName) {
+    case 'SessionStart':
+      return 'idle';
+    case 'Setup':
+    case 'InstructionsLoaded':
+      return 'unchanged';
+    case 'UserPromptSubmit':
+    case 'UserPromptExpansion':
+    case 'PreToolUse':
+    case 'PostToolUse':
+    case 'PostToolUseFailure':
+    case 'PostToolBatch':
+    case 'PermissionDenied':
+    case 'SubagentStart':
+    case 'SubagentStop':
+    case 'TaskCreated':
+    case 'TaskCompleted':
+    case 'WorktreeCreate':
+    case 'WorktreeRemove':
+    case 'ElicitationResult':
+      return 'busy';
+    case 'PermissionRequest':
+    case 'Elicitation':
+    case 'Stop':
+    case 'StopFailure':
+    case 'TeammateIdle':
+    case 'SessionEnd':
+      return 'idle';
+    case 'Notification':
+      return ['permission_prompt', 'idle_prompt', 'elicitation_dialog'].includes(
+        notificationType(payload),
+      )
+        ? 'idle'
+        : 'unchanged';
+    case 'ConfigChange':
+    case 'CwdChanged':
+    case 'FileChanged':
+    case 'PreCompact':
+    case 'PostCompact':
+      return 'unchanged';
+  }
+
+  const exhaustive: never = eventName;
+  return exhaustive;
+}
+
+function updateChatState(chatId: string, state: ChatState): boolean {
+  const existing = chats.get(chatId);
+  if (existing?.state === state) {
+    return false;
+  }
+  const chat = { chatId, state };
+  chats.set(chatId, chat);
+  broadcastChat({ type: 'updated', chat });
+  return true;
 }
 
 async function worktreeInfoFor(worktreePath: string): Promise<WorktreeListEntry> {
@@ -573,6 +698,55 @@ app.get(ROUTES.instanceCommands, (req, res) => {
     if (subscribers.size === 0) {
       commandSubscribers.delete(instanceId);
     }
+  });
+});
+
+app.post(ROUTES.claudeUpdateChatState, (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    log('claude hook ignored: malformed body');
+    res.status(204).end();
+    return;
+  }
+
+  const payload = body as Record<string, unknown>;
+  const eventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : '';
+  if (!isClaudeHookEventName(eventName)) {
+    log(`claude hook ignored: unknown event "${eventName || '(missing)'}"`);
+    res.status(204).end();
+    return;
+  }
+
+  const sessionId = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+  if (!sessionId) {
+    log(`claude hook ignored: ${eventName} without session_id`);
+    res.status(204).end();
+    return;
+  }
+
+  const transition = transitionForClaudeHook(eventName, payload);
+  if (transition === 'unchanged') {
+    res.status(204).end();
+    return;
+  }
+
+  const changed = updateChatState(sessionId, transition);
+  log(`claude chat ${sessionId} -> ${transition} (${eventName}${changed ? '' : ', unchanged'})`);
+  res.status(204).end();
+});
+
+app.get(ROUTES.liveChats, (_req, res) => {
+  res.status(200).set({
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  res.flushHeaders();
+  sseWrite(res, { type: 'snapshot', chats: chatSnapshot() });
+
+  chatSubscribers.add(res);
+  res.on('close', () => {
+    chatSubscribers.delete(res);
   });
 });
 
