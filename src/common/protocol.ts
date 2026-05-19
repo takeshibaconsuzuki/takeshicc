@@ -142,4 +142,5 @@ export interface LiveChat {
 
 export type LiveChatsMessage =
   | { type: 'snapshot'; chats: LiveChat[] }
-  | { type: 'updated'; chat: LiveChat };
+  | { type: 'updated'; chat: LiveChat }
+  | { type: 'removed'; chatId: string };

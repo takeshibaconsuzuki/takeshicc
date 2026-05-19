@@ -93,10 +93,12 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
 
     if (message.type === 'snapshot') {
       this.chats = message.chats;
-    } else {
+    } else if (message.type === 'updated') {
       const next = this.chats.filter((chat) => chat.chatId !== message.chat.chatId);
       next.push(message.chat);
       this.chats = next.sort((a, b) => a.chatId.localeCompare(b.chatId));
+    } else {
+      this.chats = this.chats.filter((chat) => chat.chatId !== message.chatId);
     }
     void this.postState();
   }

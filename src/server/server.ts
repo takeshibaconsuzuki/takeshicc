@@ -348,7 +348,7 @@ const CLAUDE_HOOK_EVENT_NAMES = [
 ] as const;
 
 type ClaudeHookEventName = (typeof CLAUDE_HOOK_EVENT_NAMES)[number];
-type HookTransition = ChatState | 'unchanged';
+type HookTransition = ChatState | 'removed' | 'unchanged';
 
 function isClaudeHookEventName(value: string): value is ClaudeHookEventName {
   return (CLAUDE_HOOK_EVENT_NAMES as readonly string[]).includes(value);
@@ -388,8 +388,9 @@ function transitionForClaudeHook(
     case 'Stop':
     case 'StopFailure':
     case 'TeammateIdle':
-    case 'SessionEnd':
       return 'idle';
+    case 'SessionEnd':
+      return 'removed';
     case 'Notification':
       return ['permission_prompt', 'idle_prompt', 'elicitation_dialog'].includes(
         notificationType(payload),
@@ -417,6 +418,14 @@ function updateChatState(chatId: string, state: ChatState): boolean {
   chats.set(chatId, chat);
   broadcastChat({ type: 'updated', chat });
   return true;
+}
+
+function removeChat(chatId: string): boolean {
+  const deleted = chats.delete(chatId);
+  if (deleted) {
+    broadcastChat({ type: 'removed', chatId });
+  }
+  return deleted;
 }
 
 async function worktreeInfoFor(worktreePath: string): Promise<WorktreeListEntry> {
@@ -726,6 +735,12 @@ app.post(ROUTES.claudeUpdateChatState, (req, res) => {
 
   const transition = transitionForClaudeHook(eventName, payload);
   if (transition === 'unchanged') {
+    res.status(204).end();
+    return;
+  }
+  if (transition === 'removed') {
+    const changed = removeChat(sessionId);
+    log(`claude chat ${sessionId} removed (${eventName}${changed ? '' : ', already absent'})`);
     res.status(204).end();
     return;
   }
