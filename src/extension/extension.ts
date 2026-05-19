@@ -6,6 +6,7 @@ import { getOrCreateServer, openServerLog } from './getOrCreateServer';
 import { COMMANDS } from './commands';
 import { mergeClaudeHttpHooks } from './claudeHooks';
 import type { ServerClient } from './ServerClient';
+import { LiveChatsViewProvider } from './liveChatsView';
 import { WorktreesViewProvider } from './worktreesView';
 import { resolveGitMetadata, type GitMetadata } from '../common/gitUtils';
 import { errMsg } from '../common/errMsg';
@@ -126,6 +127,11 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider(
       WorktreesViewProvider.viewType,
       new WorktreesViewProvider(log, () => serverClient, gitMetadata, group.groupId),
+      { webviewOptions: { retainContextWhenHidden: true } },
+    ),
+    vscode.window.registerWebviewViewProvider(
+      LiveChatsViewProvider.viewType,
+      new LiveChatsViewProvider(() => serverClient),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );

@@ -11,19 +11,12 @@ import {
   type WorktreeListEntry,
 } from '../common/gitUtils';
 import {
-  type LiveChat,
-  type LiveChatsMessage,
   type InstanceEventsMessage,
   MISSING_WORKTREE_FIELDS_ERROR,
   type WorktreeJob,
   type WorktreeJobsMessage,
 } from '../common/protocol';
-import type {
-  InstanceEventsStream,
-  LiveChatsStream,
-  ServerClient,
-  WorktreeJobsStream,
-} from './ServerClient';
+import type { InstanceEventsStream, ServerClient, WorktreeJobsStream } from './ServerClient';
 
 // Base reconnect delay for the active-jobs stream while the view is alive;
 // backs off exponentially up to the max so a server that can't be reached
@@ -49,13 +42,11 @@ interface WorktreesState {
   currentBranch?: string;
   groupId: string;
   worktreePrefix: string;
-  liveChats: LiveChat[];
   error?: string;
 }
 
 type OutboundMessage =
   | { type: 'state'; state: WorktreesState }
-  | { type: 'liveChats'; chats: LiveChat[] }
   | { type: 'createStarted' }
   | { type: 'createResult'; ok: boolean; error?: string }
   | { type: 'createDetached' }
@@ -145,13 +136,10 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   // (re)connection so a disposed view stops reconnecting.
   private jobStream?: WorktreeJobsStream;
   private instanceStream?: InstanceEventsStream;
-  private chatStream?: LiveChatsStream;
   private jobReconnectTimer?: NodeJS.Timeout;
   private instanceReconnectTimer?: NodeJS.Timeout;
-  private chatReconnectTimer?: NodeJS.Timeout;
   private jobReconnectAttempts = 0;
   private instanceReconnectAttempts = 0;
-  private chatReconnectAttempts = 0;
   private refreshTimer?: NodeJS.Timeout;
   private streamStopped = true;
   // The job the create form is currently showing as in-progress.
@@ -165,7 +153,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   // /instance-events stream.
   private registeredPaths = new Set<string>();
   private currentDeleteJobIds = new Set<string>();
-  private liveChats: LiveChat[] = [];
 
   constructor(
     private readonly log: vscode.OutputChannel,
@@ -186,10 +173,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       this.streamStopped = true;
       this.jobStream?.stop();
       this.instanceStream?.stop();
-      this.chatStream?.stop();
       this.jobStream = undefined;
       this.instanceStream = undefined;
-      this.chatStream = undefined;
       if (this.jobReconnectTimer) {
         clearTimeout(this.jobReconnectTimer);
         this.jobReconnectTimer = undefined;
@@ -197,10 +182,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       if (this.instanceReconnectTimer) {
         clearTimeout(this.instanceReconnectTimer);
         this.instanceReconnectTimer = undefined;
-      }
-      if (this.chatReconnectTimer) {
-        clearTimeout(this.chatReconnectTimer);
-        this.chatReconnectTimer = undefined;
       }
       if (this.refreshTimer) {
         clearTimeout(this.refreshTimer);
@@ -245,7 +226,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   private ensureEventStreams(): void {
     this.ensureJobStream();
     this.ensureInstanceStream();
-    this.ensureChatStream();
   }
 
   private ensureJobStream(): void {
@@ -292,27 +272,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       });
   }
 
-  private ensureChatStream(): void {
-    if (this.streamStopped || this.chatStream) {
-      return;
-    }
-    const serverClient = this.getServerClient();
-    if (!serverClient) {
-      this.scheduleChatStreamReconnect();
-      return;
-    }
-    const handle = serverClient.streamLiveChats((message) => this.onChatStreamMessage(message));
-    this.chatStream = handle;
-    handle.done
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.chatStream === handle) {
-          this.chatStream = undefined;
-        }
-        this.scheduleChatStreamReconnect();
-      });
-  }
-
   private scheduleJobStreamReconnect(): void {
     if (this.streamStopped || this.jobReconnectTimer) {
       return;
@@ -343,22 +302,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       this.ensureInstanceStream();
     }, delay);
     this.instanceReconnectTimer.unref?.();
-  }
-
-  private scheduleChatStreamReconnect(): void {
-    if (this.streamStopped || this.chatReconnectTimer) {
-      return;
-    }
-    const delay = Math.min(
-      STREAM_RECONNECT_MS * 2 ** this.chatReconnectAttempts,
-      STREAM_RECONNECT_MAX_MS,
-    );
-    this.chatReconnectAttempts++;
-    this.chatReconnectTimer = setTimeout(() => {
-      this.chatReconnectTimer = undefined;
-      this.ensureChatStream();
-    }, delay);
-    this.chatReconnectTimer.unref?.();
   }
 
   // Coalesces list refreshes that fan out from SSE events. A refresh shells out
@@ -460,19 +403,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private onChatStreamMessage(message: LiveChatsMessage): void {
-    this.chatReconnectAttempts = 0;
-
-    if (message.type === 'snapshot') {
-      this.liveChats = message.chats;
-    } else {
-      const next = this.liveChats.filter((chat) => chat.chatId !== message.chat.chatId);
-      next.push(message.chat);
-      this.liveChats = next.sort((a, b) => a.chatId.localeCompare(b.chatId));
-    }
-    void this.post({ type: 'liveChats', chats: this.liveChats });
-  }
-
   private adoptFromSnapshot(jobs: WorktreeJob[]): void {
     const jobIds = jobs.map((job) => job.jobId);
     if (this.currentJobId) {
@@ -555,7 +485,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         currentBranch: this.gitMetadata.currentBranch,
         groupId: this.groupId,
         worktreePrefix: this.worktreePrefix(),
-        liveChats: this.liveChats,
       });
     } catch (err) {
       await this.postState({
@@ -564,7 +493,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
         currentBranch: this.gitMetadata.currentBranch,
         groupId: this.groupId,
         worktreePrefix: this.worktreePrefix(),
-        liveChats: this.liveChats,
         error: this.fail('Could not load worktrees', err),
       });
     }
@@ -791,71 +719,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-
-    .live-chats {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      margin-bottom: 10px;
-    }
-
-    .live-chats-title {
-      margin: 0;
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-
-    .live-chat-list {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    .live-chat-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px;
-      align-items: center;
-      min-height: 24px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 4px 6px;
-      background: var(--vscode-sideBar-background);
-    }
-
-    .live-chat-id {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 11px;
-    }
-
-    .live-chat-state {
-      min-width: 42px;
-      border-radius: 999px;
-      padding: 1px 6px;
-      font-size: 10px;
-      line-height: 16px;
-      text-align: center;
-      text-transform: uppercase;
-    }
-
-    .live-chat-state.idle {
-      color: var(--vscode-testing-iconPassed, #73c991);
-      background: rgba(115, 201, 145, 0.14);
-    }
-
-    .live-chat-state.busy {
-      color: var(--vscode-testing-iconQueued, #cca700);
-      background: rgba(204, 167, 0, 0.16);
     }
 
     .secondary-button {
@@ -1216,10 +1079,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     <div class="current-worktree-label">Branch</div>
     <div id="currentBranch" class="current-worktree-branch">Loading...</div>
   </div>
-  <section class="live-chats" aria-labelledby="liveChatsTitle">
-    <h2 id="liveChatsTitle" class="live-chats-title">Live chats</h2>
-    <ul id="liveChats" class="live-chat-list"></ul>
-  </section>
   <button id="open" class="primary-button" type="button">Worktrees</button>
 
   <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="title">
@@ -1278,7 +1137,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     const openButton = document.getElementById('open');
     const currentWorktree = document.getElementById('currentWorktree');
     const currentBranchLabel = document.getElementById('currentBranch');
-    const liveChatsList = document.getElementById('liveChats');
     const closeButton = document.getElementById('close');
     const modal = document.getElementById('modal');
     const form = document.getElementById('form');
@@ -1299,7 +1157,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     let currentBranch = '';
     let groupId = '';
     let worktreePrefix = '';
-    let liveChats = [];
     let worktreePathWasManual = false;
     let isUpdatingWorktreePath = false;
 
@@ -1484,42 +1341,12 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    function renderLiveChats() {
-      liveChatsList.textContent = '';
-
-      if (liveChats.length === 0) {
-        const empty = document.createElement('li');
-        empty.className = 'muted';
-        empty.textContent = 'No live chats.';
-        liveChatsList.appendChild(empty);
-        return;
-      }
-
-      for (const chat of liveChats) {
-        const row = document.createElement('li');
-        row.className = 'live-chat-row';
-        row.title = chat.chatId;
-
-        const id = document.createElement('span');
-        id.className = 'live-chat-id';
-        id.textContent = chat.chatId;
-
-        const state = document.createElement('span');
-        state.className = 'live-chat-state ' + chat.state;
-        state.textContent = chat.state;
-
-        row.append(id, state);
-        liveChatsList.appendChild(row);
-      }
-    }
-
     function renderState(state) {
       branchOptions.textContent = '';
       allWorktrees = state.worktrees;
       worktreesError = state.error || '';
       availableBranches = state.branches;
       currentBranch = state.currentBranch || '';
-      liveChats = state.liveChats || [];
       currentBranchLabel.textContent = currentBranchText();
       currentBranchLabel.title = currentBranchText();
       updateModalTop();
@@ -1547,7 +1374,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       }
 
       renderWorktrees();
-      renderLiveChats();
 
       setBusy(false);
       setStatus(state.error || '');
@@ -1607,10 +1433,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
       const message = event.data;
       if (message.type === 'state') {
         renderState(message.state);
-      }
-      if (message.type === 'liveChats') {
-        liveChats = message.chats || [];
-        renderLiveChats();
       }
       if (message.type === 'createStarted') {
         setBusy(true);

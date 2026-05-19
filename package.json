@@ -53,7 +53,12 @@
       "takeshicc-sidebar": [
         {
           "id": "takeshicc.worktreesView",
-          "name": "Takeshicc",
+          "name": "Worktrees",
+          "type": "webview"
+        },
+        {
+          "id": "takeshicc.liveChatsView",
+          "name": "Live Chats",
           "type": "webview"
         }
       ]
