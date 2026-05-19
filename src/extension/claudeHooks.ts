@@ -1,47 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { HOST, ROUTES } from '../common/protocol';
+import { CLAUDE_HTTP_HOOK_EVENTS, HOST, ROUTES } from '../common/protocol';
+import { isJsonObject } from '../common/json';
 
 const HOOK_TIMEOUT_SECONDS = 2;
 
-// Claude Code's SessionStart and Setup hooks are command/mcp_tool-only, and
-// WorktreeCreate replaces Claude's default worktree creation behavior. The
-// server still handles those events if delivered, but activation should only
-// install passive HTTP observers.
-const CLAUDE_HTTP_HOOK_EVENTS = [
-  'InstructionsLoaded',
-  'UserPromptSubmit',
-  'UserPromptExpansion',
-  'PreToolUse',
-  'PermissionRequest',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'PostToolBatch',
-  'PermissionDenied',
-  'Notification',
-  'SubagentStart',
-  'SubagentStop',
-  'TaskCreated',
-  'TaskCompleted',
-  'Stop',
-  'StopFailure',
-  'TeammateIdle',
-  'ConfigChange',
-  'CwdChanged',
-  'FileChanged',
-  'WorktreeRemove',
-  'PreCompact',
-  'PostCompact',
-  'SessionEnd',
-  'Elicitation',
-  'ElicitationResult',
-] as const;
-
 type JsonObject = Record<string, unknown>;
-
-function isObject(value: unknown): value is JsonObject {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
 function settingsPath(worktreePath: string): string {
   return path.join(worktreePath, '.claude', 'settings.local.json');
@@ -53,30 +17,32 @@ function hookUrl(port: number): string {
 
 function isTakeshiccClaudeHook(value: unknown): boolean {
   return (
-    isObject(value) &&
+    isJsonObject(value) &&
     value.type === 'http' &&
     typeof value.url === 'string' &&
     value.url.endsWith(ROUTES.claudeUpdateChatState) &&
+    // We always write `HOST`, but a user (or an older build) may have written
+    // `localhost`; recognize both so prune doesn't orphan stale entries.
     (value.url.startsWith(`http://${HOST}:`) || value.url.startsWith('http://localhost:'))
   );
 }
 
-function readSettings(filePath: string): JsonObject {
-  let raw: string;
+function readSettings(filePath: string): { settings: JsonObject; raw: string | undefined } {
+  let raw: string | undefined;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return {};
+      return { settings: {}, raw: undefined };
     }
     throw err;
   }
 
   const parsed: unknown = JSON.parse(raw);
-  if (!isObject(parsed)) {
+  if (!isJsonObject(parsed)) {
     throw new Error(`${filePath} must contain a JSON object`);
   }
-  return parsed;
+  return { settings: parsed, raw };
 }
 
 function pruneTakeshiccHooks(entries: unknown): unknown[] {
@@ -86,7 +52,7 @@ function pruneTakeshiccHooks(entries: unknown): unknown[] {
 
   const pruned: unknown[] = [];
   for (const entry of entries) {
-    if (!isObject(entry)) {
+    if (!isJsonObject(entry)) {
       pruned.push(entry);
       continue;
     }
@@ -103,8 +69,8 @@ function pruneTakeshiccHooks(entries: unknown): unknown[] {
 
 export function mergeClaudeHttpHooks(worktreePath: string, port: number): boolean {
   const filePath = settingsPath(worktreePath);
-  const settings = readSettings(filePath);
-  const hooks = isObject(settings.hooks) ? settings.hooks : {};
+  const { settings, raw } = readSettings(filePath);
+  const hooks = isJsonObject(settings.hooks) ? settings.hooks : {};
   const url = hookUrl(port);
   const httpHook = { type: 'http', url, timeout: HOOK_TIMEOUT_SECONDS };
 
@@ -114,15 +80,7 @@ export function mergeClaudeHttpHooks(worktreePath: string, port: number): boolea
   settings.hooks = hooks;
 
   const next = `${JSON.stringify(settings, null, 2)}\n`;
-  let current: string | undefined;
-  try {
-    current = fs.readFileSync(filePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
-    }
-  }
-  if (current === next) {
+  if (raw === next) {
     return false;
   }
 

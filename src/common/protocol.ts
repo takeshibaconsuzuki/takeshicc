@@ -144,3 +144,57 @@ export type LiveChatsMessage =
   | { type: 'snapshot'; chats: LiveChat[] }
   | { type: 'updated'; chat: LiveChat }
   | { type: 'removed'; chatId: string };
+
+// Every Claude Code hook event the server classifies into a chat-state
+// transition. One source so the extension (which installs HTTP observers) and
+// the server (which classifies whatever arrives) can't drift.
+export const CLAUDE_HOOK_EVENT_NAMES = [
+  'SessionStart',
+  'Setup',
+  'InstructionsLoaded',
+  'UserPromptSubmit',
+  'UserPromptExpansion',
+  'PreToolUse',
+  'PermissionRequest',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PostToolBatch',
+  'PermissionDenied',
+  'Notification',
+  'SubagentStart',
+  'SubagentStop',
+  'TaskCreated',
+  'TaskCompleted',
+  'Stop',
+  'StopFailure',
+  'TeammateIdle',
+  'ConfigChange',
+  'CwdChanged',
+  'FileChanged',
+  'WorktreeCreate',
+  'WorktreeRemove',
+  'PreCompact',
+  'PostCompact',
+  'SessionEnd',
+  'Elicitation',
+  'ElicitationResult',
+] as const;
+
+export type ClaudeHookEventName = (typeof CLAUDE_HOOK_EVENT_NAMES)[number];
+
+export function isClaudeHookEventName(value: string): value is ClaudeHookEventName {
+  return (CLAUDE_HOOK_EVENT_NAMES as readonly string[]).includes(value);
+}
+
+// SessionStart/Setup are command/mcp_tool-only and WorktreeCreate replaces
+// Claude's default worktree creation — none can carry a passive HTTP observer.
+// Activation installs hooks for every *other* event; the server still handles
+// these three if delivered some other way.
+export const CLAUDE_COMMAND_ONLY_HOOK_EVENTS: readonly ClaudeHookEventName[] = [
+  'SessionStart',
+  'Setup',
+  'WorktreeCreate',
+];
+
+export const CLAUDE_HTTP_HOOK_EVENTS: readonly ClaudeHookEventName[] =
+  CLAUDE_HOOK_EVENT_NAMES.filter((name) => !CLAUDE_COMMAND_ONLY_HOOK_EVENTS.includes(name));

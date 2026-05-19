@@ -13,6 +13,7 @@ import {
 } from '../common/protocol';
 import { lineSplitter } from '../common/lineSplitter';
 import { errMsg } from '../common/errMsg';
+import { ReconnectingStream } from './reconnectingStream';
 
 const HEARTBEAT_TIMEOUT_MS = 1_000;
 const CREATE_WORKTREE_TIMEOUT_MS = 5_000;
@@ -46,10 +47,7 @@ export class ServerClient {
   private readonly timer: NodeJS.Timeout;
   private closed = false;
   private failedSinceMs: number | undefined;
-  private commandStream?: EventStream;
-  private commandReconnectTimer?: NodeJS.Timeout;
-  private commandReconnectAttempts = 0;
-  private commandHandler?: (message: InstanceCommandMessage) => void;
+  private commandStream?: ReconnectingStream<InstanceCommandMessage>;
 
   constructor(
     port: number,
@@ -76,10 +74,6 @@ export class ServerClient {
     }
     this.closed = true;
     clearInterval(this.timer);
-    if (this.commandReconnectTimer) {
-      clearTimeout(this.commandReconnectTimer);
-      this.commandReconnectTimer = undefined;
-    }
     this.commandStream?.stop();
     this.commandStream = undefined;
     this.agent.destroy();
@@ -184,8 +178,17 @@ export class ServerClient {
   }
 
   public startInstanceCommandStream(handler: (message: InstanceCommandMessage) => void): void {
-    this.commandHandler = handler;
-    this.ensureInstanceCommandStream();
+    if (this.closed || this.commandStream) {
+      return;
+    }
+    const path = `${ROUTES.instanceCommands}?instanceId=${encodeURIComponent(this.instanceId)}`;
+    this.commandStream = new ReconnectingStream<InstanceCommandMessage>(
+      (onMessage) => this.streamJson<InstanceCommandMessage>(path, onMessage),
+      handler,
+      COMMAND_RECONNECT_MS,
+      COMMAND_RECONNECT_MAX_MS,
+    );
+    this.commandStream.start();
   }
 
   // Subscribes to the server's instance-registry stream: `onMessage` gets one
@@ -251,42 +254,6 @@ export class ServerClient {
       request.on('error', reject);
     });
     return { stop: () => request?.destroy(), done };
-  }
-
-  private ensureInstanceCommandStream(): void {
-    if (this.closed || this.commandStream || !this.commandHandler) {
-      return;
-    }
-    const path = `${ROUTES.instanceCommands}?instanceId=${encodeURIComponent(this.instanceId)}`;
-    const handle = this.streamJson<InstanceCommandMessage>(path, (message) => {
-      this.commandReconnectAttempts = 0;
-      this.commandHandler?.(message);
-    });
-    this.commandStream = handle;
-    handle.done
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.commandStream === handle) {
-          this.commandStream = undefined;
-        }
-        this.scheduleInstanceCommandReconnect();
-      });
-  }
-
-  private scheduleInstanceCommandReconnect(): void {
-    if (this.closed || this.commandReconnectTimer || !this.commandHandler) {
-      return;
-    }
-    const delay = Math.min(
-      COMMAND_RECONNECT_MS * 2 ** this.commandReconnectAttempts,
-      COMMAND_RECONNECT_MAX_MS,
-    );
-    this.commandReconnectAttempts++;
-    this.commandReconnectTimer = setTimeout(() => {
-      this.commandReconnectTimer = undefined;
-      this.ensureInstanceCommandStream();
-    }, delay);
-    this.commandReconnectTimer.unref?.();
   }
 
   private markFailed(reason: string): void {

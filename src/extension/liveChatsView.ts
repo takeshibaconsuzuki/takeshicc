@@ -1,124 +1,42 @@
 import * as vscode from 'vscode';
-import type { LiveChat, LiveChatsMessage } from '../common/protocol';
-import type { LiveChatsStream, ServerClient } from './ServerClient';
+import type { LiveChatsMessage } from '../common/protocol';
+import type { ServerClient } from './ServerClient';
+import { ReconnectingStream } from './reconnectingStream';
+import { contentSecurityPolicy, nonce } from './webviewHtml';
 
-const STREAM_RECONNECT_MS = 2_000;
-const STREAM_RECONNECT_MAX_MS = 30_000;
-
-type OutboundMessage = { type: 'state'; chats: LiveChat[] };
 type WebviewMessage = { type: 'ready' };
-
-function nonce(): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let value = '';
-  for (let i = 0; i < 32; i++) {
-    value += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return value;
-}
 
 export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'takeshicc.liveChatsView';
 
   private view?: vscode.WebviewView;
-  private stream?: LiveChatsStream;
-  private reconnectTimer?: NodeJS.Timeout;
-  private reconnectAttempts = 0;
-  private streamStopped = true;
-  private chats: LiveChat[] = [];
+  private readonly stream: ReconnectingStream<LiveChatsMessage>;
 
-  constructor(private readonly getServerClient: () => ServerClient | undefined) {}
+  constructor(getServerClient: () => ServerClient | undefined) {
+    // The server (re)sends a full `snapshot` on every connect, so the webview
+    // owns the list and the provider just forwards frames — no host-side copy.
+    this.stream = new ReconnectingStream<LiveChatsMessage>(
+      (onMessage) => getServerClient()?.streamLiveChats(onMessage),
+      (message) => void this.view?.webview.postMessage(message),
+    );
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
-    this.streamStopped = false;
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.html();
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => {
       if (message.type === 'ready') {
-        void this.postState();
-        this.ensureStream();
+        this.stream.start();
       }
     });
-    webviewView.onDidDispose(() => {
-      this.streamStopped = true;
-      this.stream?.stop();
-      this.stream = undefined;
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = undefined;
-      }
-    });
-  }
-
-  private ensureStream(): void {
-    if (this.streamStopped || this.stream) {
-      return;
-    }
-    const serverClient = this.getServerClient();
-    if (!serverClient) {
-      this.scheduleReconnect();
-      return;
-    }
-    const handle = serverClient.streamLiveChats((message) => this.onStreamMessage(message));
-    this.stream = handle;
-    handle.done
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.stream === handle) {
-          this.stream = undefined;
-        }
-        this.scheduleReconnect();
-      });
-  }
-
-  private scheduleReconnect(): void {
-    if (this.streamStopped || this.reconnectTimer) {
-      return;
-    }
-    const delay = Math.min(
-      STREAM_RECONNECT_MS * 2 ** this.reconnectAttempts,
-      STREAM_RECONNECT_MAX_MS,
-    );
-    this.reconnectAttempts++;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.ensureStream();
-    }, delay);
-    this.reconnectTimer.unref?.();
-  }
-
-  private onStreamMessage(message: LiveChatsMessage): void {
-    this.reconnectAttempts = 0;
-
-    if (message.type === 'snapshot') {
-      this.chats = message.chats;
-    } else if (message.type === 'updated') {
-      const next = this.chats.filter((chat) => chat.chatId !== message.chat.chatId);
-      next.push(message.chat);
-      this.chats = next.sort((a, b) => a.chatId.localeCompare(b.chatId));
-    } else {
-      this.chats = this.chats.filter((chat) => chat.chatId !== message.chatId);
-    }
-    void this.postState();
-  }
-
-  private async postState(): Promise<void> {
-    await this.post({ type: 'state', chats: this.chats });
-  }
-
-  private async post(message: OutboundMessage): Promise<void> {
-    await this.view?.webview.postMessage(message);
+    webviewView.onDidDispose(() => this.stream.stop());
   }
 
   private html(): string {
     const scriptNonce = nonce();
     const styleNonce = nonce();
-    const csp = [
-      "default-src 'none'",
-      `style-src 'nonce-${styleNonce}'`,
-      `script-src 'nonce-${scriptNonce}'`,
-    ].join('; ');
+    const csp = contentSecurityPolicy(scriptNonce, styleNonce);
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -205,8 +123,9 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${scriptNonce}">
     const vscode = acquireVsCodeApi();
     const chatsList = document.getElementById('chats');
+    let chats = [];
 
-    function render(chats) {
+    function render() {
       chatsList.textContent = '';
 
       if (chats.length === 0) {
@@ -235,13 +154,25 @@ export class LiveChatsViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    window.addEventListener('message', (event) => {
-      const message = event.data;
-      if (message.type === 'state') {
-        render(message.chats || []);
+    function apply(message) {
+      if (message.type === 'snapshot') {
+        chats = message.chats;
+      } else if (message.type === 'updated') {
+        chats = chats
+          .filter((chat) => chat.chatId !== message.chat.chatId)
+          .concat(message.chat)
+          .sort((a, b) => a.chatId.localeCompare(b.chatId));
+      } else if (message.type === 'removed') {
+        chats = chats.filter((chat) => chat.chatId !== message.chatId);
+      } else {
+        return;
       }
-    });
+      render();
+    }
 
+    window.addEventListener('message', (event) => apply(event.data));
+
+    render();
     vscode.postMessage({ type: 'ready' });
   </script>
 </body>

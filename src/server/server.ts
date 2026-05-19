@@ -26,6 +26,8 @@ import {
   RegisterRequest,
   UnregisterRequest,
   ChatState,
+  ClaudeHookEventName,
+  isClaudeHookEventName,
   WorktreeJobOperation,
   WorktreeJobsMessage,
 } from '../common/protocol';
@@ -38,6 +40,7 @@ import {
 } from '../common/gitUtils';
 import { lineSplitter } from '../common/lineSplitter';
 import { errMsg } from '../common/errMsg';
+import { isJsonObject } from '../common/json';
 
 const IDLE_CHECK_MS = 5_000;
 
@@ -315,49 +318,17 @@ function trimStr(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-const CLAUDE_HOOK_EVENT_NAMES = [
-  'SessionStart',
-  'Setup',
-  'InstructionsLoaded',
-  'UserPromptSubmit',
-  'UserPromptExpansion',
-  'PreToolUse',
-  'PermissionRequest',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'PostToolBatch',
-  'PermissionDenied',
-  'Notification',
-  'SubagentStart',
-  'SubagentStop',
-  'TaskCreated',
-  'TaskCompleted',
-  'Stop',
-  'StopFailure',
-  'TeammateIdle',
-  'ConfigChange',
-  'CwdChanged',
-  'FileChanged',
-  'WorktreeCreate',
-  'WorktreeRemove',
-  'PreCompact',
-  'PostCompact',
-  'SessionEnd',
-  'Elicitation',
-  'ElicitationResult',
-] as const;
-
-type ClaudeHookEventName = (typeof CLAUDE_HOOK_EVENT_NAMES)[number];
 type HookTransition = ChatState | 'removed' | 'unchanged';
-
-function isClaudeHookEventName(value: string): value is ClaudeHookEventName {
-  return (CLAUDE_HOOK_EVENT_NAMES as readonly string[]).includes(value);
-}
 
 function notificationType(payload: Record<string, unknown>): string {
   return typeof payload.notification_type === 'string' ? payload.notification_type : '';
 }
 
+// Maps a hook event to a chat state. Invariant: a chat blocked *waiting on the
+// human* (a permission/elicitation prompt, Stop, TeammateIdle) is `idle`, not
+// `busy` — only work Claude is actively driving counts as busy. That is why
+// PermissionRequest/Elicitation and the prompt-style Notifications resolve to
+// `idle`.
 function transitionForClaudeHook(
   eventName: ClaudeHookEventName,
   payload: Record<string, unknown>,
@@ -711,14 +682,13 @@ app.get(ROUTES.instanceCommands, (req, res) => {
 });
 
 app.post(ROUTES.claudeUpdateChatState, (req, res) => {
-  const body = req.body;
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+  const payload = req.body;
+  if (!isJsonObject(payload)) {
     log('claude hook ignored: malformed body');
     res.status(204).end();
     return;
   }
 
-  const payload = body as Record<string, unknown>;
   const eventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : '';
   if (!isClaudeHookEventName(eventName)) {
     log(`claude hook ignored: unknown event "${eventName || '(missing)'}"`);
@@ -739,14 +709,16 @@ app.post(ROUTES.claudeUpdateChatState, (req, res) => {
     return;
   }
   if (transition === 'removed') {
-    const changed = removeChat(sessionId);
-    log(`claude chat ${sessionId} removed (${eventName}${changed ? '' : ', already absent'})`);
+    if (removeChat(sessionId)) {
+      log(`claude chat ${sessionId} removed (${eventName})`);
+    }
     res.status(204).end();
     return;
   }
 
-  const changed = updateChatState(sessionId, transition);
-  log(`claude chat ${sessionId} -> ${transition} (${eventName}${changed ? '' : ', unchanged'})`);
+  if (updateChatState(sessionId, transition)) {
+    log(`claude chat ${sessionId} -> ${transition} (${eventName})`);
+  }
   res.status(204).end();
 });
 

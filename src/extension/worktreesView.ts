@@ -16,13 +16,10 @@ import {
   type WorktreeJob,
   type WorktreeJobsMessage,
 } from '../common/protocol';
-import type { InstanceEventsStream, ServerClient, WorktreeJobsStream } from './ServerClient';
+import type { ServerClient } from './ServerClient';
+import { ReconnectingStream } from './reconnectingStream';
+import { contentSecurityPolicy, nonce } from './webviewHtml';
 
-// Base reconnect delay for the active-jobs stream while the view is alive;
-// backs off exponentially up to the max so a server that can't be reached
-// doesn't spin a tight wake loop.
-const STREAM_RECONNECT_MS = 2_000;
-const STREAM_RECONNECT_MAX_MS = 30_000;
 // Coalesces list refreshes triggered by SSE events (each refresh shells out to
 // git).
 const REFRESH_COALESCE_MS = 300;
@@ -118,30 +115,16 @@ function expandHome(inputPath: string): string {
   return inputPath;
 }
 
-function nonce(): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let value = '';
-  for (let i = 0; i < 32; i++) {
-    value += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return value;
-}
-
 export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'takeshicc.worktreesView';
 
   private view?: vscode.WebviewView;
 
-  // Persistent SSE subscriptions and their lifecycle. `streamStopped` gates
-  // (re)connection so a disposed view stops reconnecting.
-  private jobStream?: WorktreeJobsStream;
-  private instanceStream?: InstanceEventsStream;
-  private jobReconnectTimer?: NodeJS.Timeout;
-  private instanceReconnectTimer?: NodeJS.Timeout;
-  private jobReconnectAttempts = 0;
-  private instanceReconnectAttempts = 0;
+  // Persistent SSE subscriptions, each self-reconnecting until the view is
+  // disposed.
+  private readonly jobStream: ReconnectingStream<WorktreeJobsMessage>;
+  private readonly instanceStream: ReconnectingStream<InstanceEventsMessage>;
   private refreshTimer?: NodeJS.Timeout;
-  private streamStopped = true;
   // The job the create form is currently showing as in-progress.
   private currentJobId?: string;
   // Canonical paths of worktrees whose server job is still in flight, derived
@@ -159,30 +142,27 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
     private readonly getServerClient: () => ServerClient | undefined,
     private readonly gitMetadata: GitMetadata,
     private readonly groupId: string,
-  ) {}
+  ) {
+    this.jobStream = new ReconnectingStream<WorktreeJobsMessage>(
+      (onMessage) => this.getServerClient()?.streamWorktreeJobs(onMessage),
+      (message) => this.onJobStreamMessage(message),
+    );
+    this.instanceStream = new ReconnectingStream<InstanceEventsMessage>(
+      (onMessage) => this.getServerClient()?.streamInstanceEvents(onMessage),
+      (message) => this.onInstanceStreamMessage(message),
+    );
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
-    this.streamStopped = false;
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.html();
     webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => {
       void this.handleMessage(message);
     });
     webviewView.onDidDispose(() => {
-      this.streamStopped = true;
-      this.jobStream?.stop();
-      this.instanceStream?.stop();
-      this.jobStream = undefined;
-      this.instanceStream = undefined;
-      if (this.jobReconnectTimer) {
-        clearTimeout(this.jobReconnectTimer);
-        this.jobReconnectTimer = undefined;
-      }
-      if (this.instanceReconnectTimer) {
-        clearTimeout(this.instanceReconnectTimer);
-        this.instanceReconnectTimer = undefined;
-      }
+      this.jobStream.stop();
+      this.instanceStream.stop();
       if (this.refreshTimer) {
         clearTimeout(this.refreshTimer);
         this.refreshTimer = undefined;
@@ -224,84 +204,8 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   }
 
   private ensureEventStreams(): void {
-    this.ensureJobStream();
-    this.ensureInstanceStream();
-  }
-
-  private ensureJobStream(): void {
-    if (this.streamStopped || this.jobStream) {
-      return;
-    }
-    const serverClient = this.getServerClient();
-    if (!serverClient) {
-      this.scheduleJobStreamReconnect();
-      return;
-    }
-    const handle = serverClient.streamWorktreeJobs((message) => this.onJobStreamMessage(message));
-    this.jobStream = handle;
-    handle.done
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.jobStream === handle) {
-          this.jobStream = undefined;
-        }
-        this.scheduleJobStreamReconnect();
-      });
-  }
-
-  private ensureInstanceStream(): void {
-    if (this.streamStopped || this.instanceStream) {
-      return;
-    }
-    const serverClient = this.getServerClient();
-    if (!serverClient) {
-      this.scheduleInstanceStreamReconnect();
-      return;
-    }
-    const handle = serverClient.streamInstanceEvents((message) =>
-      this.onInstanceStreamMessage(message),
-    );
-    this.instanceStream = handle;
-    handle.done
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.instanceStream === handle) {
-          this.instanceStream = undefined;
-        }
-        this.scheduleInstanceStreamReconnect();
-      });
-  }
-
-  private scheduleJobStreamReconnect(): void {
-    if (this.streamStopped || this.jobReconnectTimer) {
-      return;
-    }
-    const delay = Math.min(
-      STREAM_RECONNECT_MS * 2 ** this.jobReconnectAttempts,
-      STREAM_RECONNECT_MAX_MS,
-    );
-    this.jobReconnectAttempts++;
-    this.jobReconnectTimer = setTimeout(() => {
-      this.jobReconnectTimer = undefined;
-      this.ensureJobStream();
-    }, delay);
-    this.jobReconnectTimer.unref?.();
-  }
-
-  private scheduleInstanceStreamReconnect(): void {
-    if (this.streamStopped || this.instanceReconnectTimer) {
-      return;
-    }
-    const delay = Math.min(
-      STREAM_RECONNECT_MS * 2 ** this.instanceReconnectAttempts,
-      STREAM_RECONNECT_MAX_MS,
-    );
-    this.instanceReconnectAttempts++;
-    this.instanceReconnectTimer = setTimeout(() => {
-      this.instanceReconnectTimer = undefined;
-      this.ensureInstanceStream();
-    }, delay);
-    this.instanceReconnectTimer.unref?.();
+    this.jobStream.start();
+    this.instanceStream.start();
   }
 
   // Coalesces list refreshes that fan out from SSE events. A refresh shells out
@@ -318,8 +222,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   }
 
   private onInstanceStreamMessage(message: InstanceEventsMessage): void {
-    this.instanceReconnectAttempts = 0;
-
     if (message.type === 'snapshot') {
       this.registeredPaths = new Set(
         message.instances.map((instance) => canonicalizePath(instance.worktreePath)),
@@ -333,9 +235,6 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   }
 
   private onJobStreamMessage(message: WorktreeJobsMessage): void {
-    // Any frame proves a healthy connection — reset the reconnect backoff.
-    this.jobReconnectAttempts = 0;
-
     if (message.type === 'snapshot') {
       // Authoritative set of in-flight worktrees (covers a reconnect that
       // missed `created`/`done` frames). Refresh so rows pick up / drop the
@@ -638,11 +537,7 @@ export class WorktreesViewProvider implements vscode.WebviewViewProvider {
   private html(): string {
     const scriptNonce = nonce();
     const styleNonce = nonce();
-    const csp = [
-      "default-src 'none'",
-      `style-src 'nonce-${styleNonce}'`,
-      `script-src 'nonce-${scriptNonce}'`,
-    ].join('; ');
+    const csp = contentSecurityPolicy(scriptNonce, styleNonce);
 
     return /* html */ `<!DOCTYPE html>
 <html lang="en">
